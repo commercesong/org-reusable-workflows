@@ -1,0 +1,311 @@
+name: Terraform Infrastructure Workflow
+
+on:
+  workflow_call:
+    inputs:
+      tf_backend_config_key:
+        description: 'Terraform backend config key (e.g., backup-services)'
+        required: true
+        type: string
+      aws_region:
+        description: 'AWS Region'
+        required: true
+        type: string
+        default: "us-east-1"
+      commit_hash:
+        description: 'Commit hash to use for deployment'
+        required: true
+        type: string
+      ref:
+        description: 'Branch reference from the calling workflow'
+        required: true
+        type: string
+      terraform_path:
+        description: 'Path to the Terraform directory'
+        required: false
+        type: string
+        default: '.'
+      tfvars_path:
+        description: 'Path to tfvars files (relative to terraform_path). Use ".." for parent directory, "." for current directory'
+        required: false
+        type: string
+        default: '.'
+      terraform_version:
+        description: 'Terraform version to use'
+        required: false
+        type: string
+        default: '1.8.3'
+      enable_plan_comment:
+        description: 'Enable Terraform plan comments on PRs'
+        required: false
+        type: boolean
+        default: true
+      auto_apply_dev:
+        description: 'Auto-apply changes to dev environment'
+        required: false
+        type: boolean
+        default: true
+      require_approval_prod:
+        description: 'Require manual approval for prod deployments'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      aws_account_id_dev:
+        description: 'AWS Account ID for Dev'
+        required: true
+      aws_access_key_id_dev:
+        description: 'AWS Access Key ID for Dev'
+        required: true
+      aws_secret_access_key_dev:
+        description: 'AWS Secret Access Key for Dev'
+        required: true
+      aws_account_id_prod:
+        description: 'AWS Account ID for Prod'
+        required: true
+      aws_access_key_id_prod:
+        description: 'AWS Access Key ID for Prod'
+        required: true
+      aws_secret_access_key_prod:
+        description: 'AWS Secret Access Key for Prod'
+        required: true
+
+env:
+  TF_BACKEND_CONFIG_KEY: ${{ inputs.tf_backend_config_key }}
+  AWS_REGION: ${{ inputs.aws_region }}
+  COMMIT_HASH: ${{ inputs.commit_hash }}
+  TERRAFORM_PATH: ${{ inputs.terraform_path }}
+  TFVARS_PATH: ${{ inputs.tfvars_path }}
+
+# Set GITHUB_TOKEN permissions
+permissions:
+  contents: read
+  pull-requests: write  # For plan comments
+  issues: write        # For plan comments
+
+jobs:
+  terraform-plan-dev:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'pull_request' || inputs.ref == 'refs/heads/develop' || startsWith(inputs.ref, 'refs/heads/feature/')
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_dev }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_dev }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_dev }}
+      AWS_ENV: dev
+    outputs:
+      plan_output: ${{ steps.plan.outputs.stdout }}
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: |
+          terraform init \
+            -backend-config="bucket=terraform-state-${{ env.AWS_ACCOUNT_ID }}" \
+            -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: |
+          terraform plan -var-file="${{ env.TFVARS_PATH }}/env-${{ env.AWS_ENV }}.tfvars" -out=tfplan
+          terraform show -no-color tfplan
+
+      - name: Comment Plan on PR
+        if: github.event_name == 'pull_request' && inputs.enable_plan_comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const output = `
+            ## Terraform Plan Results (Dev Environment)
+            
+            **Terraform Path:** \`${{ env.TERRAFORM_PATH }}\`
+            **Backend Key:** \`${{ env.TF_BACKEND_CONFIG_KEY }}\`
+            **Environment:** \`dev\`
+            
+            ### Plan Output
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+            
+            *Plan generated for commit: ${{ env.COMMIT_HASH }}*
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  terraform-apply-dev:
+    needs: terraform-plan-dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: |
+      (inputs.ref == 'refs/heads/develop' || startsWith(inputs.ref, 'refs/heads/feature/')) && 
+      inputs.auto_apply_dev && 
+      needs.terraform-plan-dev.outputs.plan_exitcode == '0'
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_dev }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_dev }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_dev }}
+      AWS_ENV: dev
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: |
+          terraform init \
+            -backend-config="bucket=terraform-state-${{ env.AWS_ACCOUNT_ID }}" \
+            -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: |
+          terraform apply -auto-approve -var-file="${{ env.TFVARS_PATH }}/env-${{ env.AWS_ENV }}.tfvars"
+
+  terraform-plan-prod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: inputs.ref == 'refs/heads/main' || inputs.ref == 'refs/heads/master'
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_prod }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_prod }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_prod }}
+      AWS_ENV: prod
+    outputs:
+      plan_output: ${{ steps.plan.outputs.stdout }}
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: |
+          terraform init \
+            -backend-config="bucket=terraform-state-${{ env.AWS_ACCOUNT_ID }}" \
+            -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: |
+          terraform plan -var-file="${{ env.TFVARS_PATH }}/env-${{ env.AWS_ENV }}.tfvars" -out=tfplan
+          terraform show -no-color tfplan
+
+  terraform-apply-prod:
+    needs: terraform-plan-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: |
+      (inputs.ref == 'refs/heads/main' || inputs.ref == 'refs/heads/master') && 
+      needs.terraform-plan-prod.outputs.plan_exitcode == '0'
+    # Auto-deploys to production on main branch merges (following org standard)
+    # To add manual approval gates, uncomment: environment: production
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_prod }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_prod }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_prod }}
+      AWS_ENV: prod
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: |
+          terraform init \
+            -backend-config="bucket=terraform-state-${{ env.AWS_ACCOUNT_ID }}" \
+            -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: |
+          terraform apply -auto-approve -var-file="${{ env.TFVARS_PATH }}/env-${{ env.AWS_ENV }}.tfvars" 

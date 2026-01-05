@@ -1,0 +1,651 @@
+# Org Reusable Workflows
+
+This repository contains a collection of reusable GitHub Actions workflows designed to streamline and standardize CI/CD processes across our organization.
+
+## Workflows
+
+### 1. CICD Terraform Container Workflow
+This workflow automates the continuous integration and continuous deployment (CICD) process using Terraform within a containerized environment. It ensures consistent and efficient infrastructure provisioning across multiple environments.
+
+### 2. Manual Terraform Deployment Workflow
+This workflow facilitates manual Terraform deployments with added checks and balances. It allows for environment-specific deployments with controlled, manual intervention, ensuring that deployments are carried out safely and intentionally.
+
+### 3. NPM Package Publishing Workflow
+This workflow automates the process of testing and publishing NPM packages to GitHub Packages. It ensures consistency in package versioning, runs tests with the appropriate AWS credentials, and publishes packages only when all validations pass.
+
+### 4. Terraform Infrastructure Workflow
+This workflow is designed for **pure Terraform infrastructure deployments** (no Docker containers involved). It's perfect for infrastructure modules like backup services, networking, or security configurations. The workflow provides plan-on-PR functionality, auto-deploys to dev, and auto-deploys to production on main branch merges (following org standard).
+
+## Example Usage
+
+These examples show how to call these reusable workflows from your own repos. You'll still need to create a GitHub Actions workflow in your repo, and that will call this reusable workflow.
+
+### Example Usage - CICD Terraform Container Workflow
+
+`.github/workflows/cicd.yml`:
+```yaml
+name: CICD
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  cicd-deploy:
+    uses: commercesong/org-reusable-workflows/.github/workflows/cicd-terraform-container.yml@main
+    with:
+      commit_hash: ${{ github.sha }}
+      ref: ${{ github.ref }}
+      aws_region: "us-east-1"
+      image_name: "commercesong/api"
+      tf_backend_config_key: "api"
+      microservice_path: "services/api"
+      platform: "linux/arm64"
+      run_tests: true
+      test_install_command: "npm install --include=dev"
+      test_auto_setup_npmrc: true  # DEPRECATED: This now defaults to true and is optional
+      test_command: "npm test"
+      test_env: '{"NODE_ENV": "test", "CI": "true"}'
+      test_env_file: "env-dev.env"
+      test_inject_aws_credentials: true
+      test_secret_env_ssm_paths: '["cs/secrets/jwt_secret", "cs/secrets/db_password"]'
+      test_execution_role_name: "api-test-role"
+      disable_docker_cache: false
+      job_timeout_minutes: 60
+    secrets:
+      aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
+      aws_access_key_id_dev: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+      aws_secret_access_key_dev: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+      aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
+      aws_access_key_id_prod: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+      aws_secret_access_key_prod: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+```
+
+In this example, we've added the following optional parameters:
+
+- `microservice_path`: Path to the microservice directory within your repository. This is useful when you have multiple services in the same repository. Defaults to '.' (root directory).
+- `platform`: Platform for Docker build (e.g., linux/amd64, linux/arm64). Defaults to 'linux/arm64'.
+- `run_tests`: Set to `true` to enable running tests within the Docker container (only for dev environment).
+- `test_install_command`: Specifies the command to install test dependencies. This is optional - if you don't need to install anything before running tests, you can omit this parameter or leave it as an empty string. **Note**: For services using private GitHub packages, it's often simpler to include dev dependencies directly in the container build (using `npm install --include=dev` in your Dockerfile) rather than installing them during test execution. If you take this approach, you would omit the `test_install_command` parameter entirely or set it to an empty string, since the testing dependencies are already installed in the container.
+- `test_auto_setup_npmrc`: **DEPRECATED** - This parameter now defaults to `true` and will be ignored in future versions. The workflow automatically creates `.npmrc` with GitHub authentication before running `test_install_command`. This is the recommended solution for services that need to install private GitHub packages during testing. The workflow will automatically create the `.npmrc` file, run your test installation command, and then clean up the `.npmrc` file for security. Defaults to `true`.
+- `test_command`: Specifies the command to run the tests.
+- `test_env`: A JSON string of environment variables to be set when running the tests.
+- `test_env_file`: Path to an environment file containing additional environment variables for testing.
+- `test_inject_aws_credentials`: Set to `true` to inject AWS credentials into the test container.
+- `test_secret_env_ssm_paths`: A JSON-formatted array of SSM parameter paths for secret environment variables. This simulates how ECS/Lambda would normally inject SSM parameters as environment variables in production. For example, if you pass `["cs/secrets/jwt_secret"]`, the workflow will fetch this value from SSM and create an environment variable `JWT_SECRET` in your test container, similar to how it would work in production. Do not include a leading '/' in these paths.
+- `test_execution_role_name`: Name of the role to assume for running tests. This is useful when you want to test with restricted permissions to ensure your application works with the intended IAM role. If not specified, tests will run with the admin credentials (when test_inject_aws_credentials is true).
+- `disable_docker_cache`: Set to `true` to force Docker to build the image without using any cached layers. This is useful when you want to ensure a completely fresh build, such as when dependencies might have been updated without version changes. Defaults to `false`.
+- `job_timeout_minutes`: Timeout in minutes for each job (build-and-push-dev, deploy-dev, build-and-push-prod, deploy-prod). Defaults to `60`. Increase this for services with long-running test suites.
+
+Note: When using `test_execution_role_name`, the role must have a trust policy allowing the CI/CD pipeline user to assume it:
+```json
+{
+    "Effect": "Allow",
+    "Principal": {
+        "AWS": "arn:aws:iam::${account_id}:user/cicd-pipeline-user"
+    },
+    "Action": "sts:AssumeRole"
+}
+```
+
+The workflow will search for and apply all `aws_ecr_repository` and `aws_iam_role` resources before proceeding with the build and test steps. This ensures that necessary infrastructure is in place before the tests begin.
+
+Note: 
+1. The environment variables are combined from `test_env`, `test_env_file`, and SSM parameters when running the tests. 
+2. Variables in `test_env` take precedence over those in the file if there are conflicts.
+3. For SSM parameters, the last part of the path is used as the environment variable name (in uppercase). For example, `cs/secrets/jwt_secret` becomes `JWT_SECRET`.
+
+If you don't want to run tests, you can omit these parameters or set `run_tests` to `false`. Tests are only run in the dev environment.
+
+The workflow will build the Docker image, run the specified tests within the container (with AWS credentials and secret environment variables if specified), and only proceed with pushing and deploying if the tests pass.
+
+### Example Usage - Manual Terraform Deployment
+
+`.github/workflows/manual-terraform-deploy.yml`:
+```yaml
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      commit_hash:
+        description: 'GitHub SHA to deploy'
+        required: true
+        type: string
+
+jobs:
+  manual-deploy:
+    uses: commercesong/org-reusable-workflows/.github/workflows/manual-terraform-deploy.yml@main
+    with:
+      environment: ${{ github.event.inputs.environment }}
+      commit_hash: ${{ github.event.inputs.commit_hash }}
+      aws_region: "us-east-1"
+      image_name: "commercesong/api"
+      tf_backend_config_key: "api"
+    secrets:
+      aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
+      aws_access_key_id_dev: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+      aws_secret_access_key_dev: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+      aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
+      aws_access_key_id_prod: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+      aws_secret_access_key_prod: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+```
+
+### Example Usage - NPM Package Publishing
+
+`.github/workflows/publish.yml`:
+```yaml
+name: Publish Package
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  publish:
+    uses: commercesong/org-reusable-workflows/.github/workflows/publish-npm-package.yml@main
+    with:
+      ref: ${{ github.ref }}
+      package_name: "user-data-client"
+      node_version: "20"
+      aws_region: "us-east-1"
+      run_tests: true
+      test_environment_variables: '{"LOG_LEVEL": "debug"}'
+    # Pass all repository secrets to reusable workflow (requires explicit listing in reusable workflow)
+    secrets: inherit
+```
+
+In this example, we've included the following parameters:
+
+- `ref`: The branch reference from the calling workflow.
+- `package_name`: The name of the NPM package (used for version checking).
+- `package_path`: (Optional) Path to the NPM package directory. Defaults to '.' (root directory).
+- `node_version`: (Optional) The Node.js version to use. Defaults to '20'.
+- `aws_region`: (Optional) The AWS region to use for AWS operations. Defaults to 'us-east-1'.
+- `run_tests`: (Optional) Whether to run tests. Defaults to 'true'.
+- `test_environment_variables`: (Optional) Environment variables to set during testing in JSON format.
+- `test_environment_secrets`: (Optional) Secret environment variables to set during testing in JSON format. Use this for sensitive values that should be passed as secrets from your repository.
+
+**Important Limitation - Secret Passing:**
+GitHub Actions doesn't support truly generic secret passing to reusable workflows. While `secrets: inherit` makes all secrets available to the reusable workflow, they must be **explicitly listed** in the reusable workflow's environment variables to be accessible during test execution.
+
+**To add a new test secret:**
+1. Add the secret as an environment variable in the reusable workflow's test step:
+   ```yaml
+   env:
+     YOUR_SECRET: ${{ secrets.YOUR_SECRET }}
+   ```
+2. Configure `YOUR_SECRET` as a repository secret in GitHub Actions settings
+3. Use `secrets: inherit` in your calling workflow
+
+This limitation means the reusable workflow isn't fully automatic and requires modification when new secrets are needed across different repositories.
+
+The workflow performs the following key operations:
+1. Runs tests with appropriate AWS credentials:
+   - For `main` branch: Tests run against AWS production environment with `AWS_ENV=prod`
+   - For all other branches (including `develop`): Tests run against AWS development environment with `AWS_ENV=dev`
+2. For the main branch only, it also runs the publish job:
+   - Verifies that the current package version is greater than the latest published version
+   - Publishes the package to GitHub Packages using the repository's GITHUB_TOKEN
+
+Note: All environment files (*.env and .env*) will be processed to remove AWS_PROFILE variables, as these can interfere with AWS credential configuration in CI/CD environments.
+
+### Example Usage - Terraform Infrastructure
+
+`.github/workflows/backup-services.yml`:
+```yaml
+name: Backup Services Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'terraform/backup-services/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'terraform/backup-services/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+
+jobs:
+  backup-services-infrastructure:
+    uses: commercesong/org-reusable-workflows/.github/workflows/terraform-infrastructure.yml@main
+    with:
+      tf_backend_config_key: "backup-services"
+      aws_region: "us-east-1"
+      commit_hash: ${{ github.sha }}
+      ref: ${{ github.ref }}
+      terraform_path: "terraform/backup-services"
+      terraform_version: "1.8.3"
+      enable_plan_comment: true
+      auto_apply_dev: true
+    secrets:
+      aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
+      aws_access_key_id_dev: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+      aws_secret_access_key_dev: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+      aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
+      aws_access_key_id_prod: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+      aws_secret_access_key_prod: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+```
+
+**Key features of this workflow:**
+
+- **Path-based triggers**: Only runs when files in the specified Terraform directory change
+- **Plan on PRs**: Shows Terraform plan output as comments on pull requests
+- **Auto-deploy dev**: Automatically applies changes to dev environment on develop branch merges
+- **Auto-deploy prod**: Automatically applies changes to prod environment on main branch merges (org standard)
+- **Manual dispatch**: Allows manual deployment to any environment via GitHub UI
+- **Pure Terraform**: No Docker or container complexity
+
+**Parameters:**
+
+- `tf_backend_config_key`: The S3 key prefix for your Terraform state (e.g., "backup-services"). **Important:** Do NOT include "/terraform.tfstate" in this value - the workflow automatically appends it to create the full backend key.
+- `terraform_path`: Path to your Terraform directory within the repository
+- `tfvars_path`: Path to tfvars files relative to terraform_path (defaults to "."). Use ".." for shared parent directory tfvars
+- `terraform_version`: Version of Terraform to use (defaults to "1.8.3")
+- `enable_plan_comment`: Whether to comment Terraform plans on PRs (defaults to true)
+- `auto_apply_dev`: Whether to auto-apply to dev environment (defaults to true)
+
+**Tfvars Configuration:**
+
+The workflow supports two approaches for tfvars files:
+
+- **Module-specific**: Use `tfvars_path: "."` with `env-dev.tfvars` in each module directory
+- **Shared parent**: Use `tfvars_path: ".."` with shared `../env-dev.tfvars` for common variables
+
+**Deployment Flow:**
+
+1. **Pull Requests**: Runs `terraform plan` and comments the results on the PR
+2. **Develop Branch**: Auto-deploys to dev environment after merge
+3. **Main Branch**: Auto-deploys to production environment after merge
+4. **Manual Dispatch**: Deploy to any environment on-demand via GitHub UI
+
+## Pre-Requisites for Repos Using these Workflows
+
+To successfully use these reusable workflows, your repository must meet the following requirements:
+
+### 1. Repository Structure
+Your repository can be organized in one of two ways:
+
+#### Single Service Repository
+For repositories containing a single service, maintain the following structure:
+```
+your-repo/
+├── terraform/          # Terraform configuration files
+│   ├── env-dev.tfvars
+│   └── env-prod.tfvars
+├── Dockerfile         # Docker configuration (for container workflows)
+└── *                 # Application source code files
+```
+
+#### Pure Infrastructure Repository (for Terraform Infrastructure Workflow)
+For repositories containing only infrastructure (no containers), maintain this structure:
+```
+your-repo/
+├── terraform/          # Terraform modules directory
+│   ├── backup-services/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── env-dev.tfvars
+│   │   └── env-prod.tfvars
+│   ├── networking/
+│   │   ├── main.tf
+│   │   ├── env-dev.tfvars
+│   │   └── env-prod.tfvars
+│   └── security/
+│       ├── main.tf
+│       ├── env-dev.tfvars
+│       └── env-prod.tfvars
+└── .github/workflows/  # CI/CD workflows for each module
+```
+
+#### Multi-Service Repository
+For repositories containing multiple services, maintain the following structure:
+```
+your-repo/
+├── services/
+│   ├── service1/
+│   │   ├── terraform/    # Service1 Terraform configuration
+│   │   │   ├── env-dev.tfvars
+│   │   │   └── env-prod.tfvars
+│   │   ├── Dockerfile   # Service1 Docker configuration
+│   │   └── *            # Service1 source code files
+│   └── service2/
+│       ├── terraform/    # Service2 Terraform configuration
+│       │   ├── env-dev.tfvars
+│       │   └── env-prod.tfvars
+│       ├── Dockerfile   # Service2 Docker configuration
+│       └── *            # Service2 source code files
+```
+
+When using a multi-service repository structure, specify the `microservice_path` parameter in your workflow (e.g., `microservice_path: "services/service1"`).
+
+### 2. Terraform Subdirectory
+Your repository must include a `terraform` subdirectory at the root level. This directory will contain all Terraform configuration files necessary for infrastructure deployment.
+
+### 3. Environment Specific Variable Files
+Within the `terraform` subdirectory, you must include environment-specific variable files. These files should follow the naming convention:
+
+For example:
+- `env-dev.tfvars`
+- `env-prod.tfvars`
+
+These variable files will be used by Terraform during the deployment process to apply environment-specific configurations.
+
+### 4. Ensuring Accurate Version Deployment with Image Variables
+
+When integrating your application with this reusable workflow, it's essential to ensure that your Terraform configuration includes the image_name and image_tag variables. The image_name variable, as shown in the example below, should be passed to the reusable workflow and specify the base name of your Docker image. Meanwhile, the image_tag variable must be defined in your Terraform configuration to specify the exact version of the image to be deployed.
+
+By implementing these variables, you ensure that the correct version of your application is deployed. Without properly setting the image_tag, the deployment may not update to the intended version, potentially leaving an older version running. Thus, incorporating these variables into your Terraform is not merely a convenience but a necessary step to guarantee that your deployment reflects the desired container version.
+
+Here's an example Terraform fragment of how you would use the image_name and image_tag variables when configuring your ECS task definition.
+
+```hcl
+resource "aws_ecs_task_definition" "api" {
+  family                   = "api"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = var.container_cpu
+  memory                   = var.container_memory
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+  container_definitions    = jsonencode([
+    {
+      name      = "api",
+      image     = "${aws_ecr_repository.ecr_repo.repository_url}:${var.image_tag}",
+```
+
+### 5. Required Secrets
+Your organization must have specific secrets configured for each environment. These secrets are necessary for the workflow to access AWS credentials and should be set up at the organization level. The required secrets are:
+
+- **AWS_ACCOUNT_ID_DEV**, **AWS_ACCESS_KEY_ID_DEV**, **AWS_SECRET_ACCESS_KEY_DEV** (for the `dev` environment)
+- **AWS_ACCOUNT_ID_PROD**, **AWS_ACCESS_KEY_ID_PROD**, **AWS_SECRET_ACCESS_KEY_PROD** (for the `prod` environment)
+
+These secrets must be available for the workflow to properly authenticate and deploy infrastructure to the specified AWS environments.
+
+## Initial Setup for Reusable Workflows
+
+Before using the reusable workflows in this repository, you need to perform some initial manual setup steps to ensure everything is correctly configured:
+
+* Organization-Level Setup: In your organization settings, go to Actions > General and select Allow all actions and reusable workflows to enable sharing across the organization.
+
+* Repository-Level Setup: In this repository's settings, under Actions > General, scroll to the Access section. Change Control how this repository is used by GitHub Actions workflows from Not accessible to Accessible from repositories in the commercesong organization, then click Save.
+
+These steps are only required as part of the initial configuration and must be completed to allow other repositories in the organization to reference and use these reusable workflows.
+
+## IAM Role Configuration for Testing
+
+When using `test_execution_role_name`, you need to configure your Lambda or ECS execution role in Terraform to include the CI/CD pipeline user in its trust policy. Here's how:
+
+### For Lambda Functions:
+```hcl
+resource "aws_iam_role" "lambda_exec_role" {
+  name = "${var.service_name}-lambda-exec-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        # Allow Lambda service to assume this role
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      },
+      {
+        # Allow CI/CD pipeline to assume this role for testing
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${var.aws_account_id}:user/cicd-pipeline-user"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+```
+
+### For ECS Tasks:
+```hcl
+resource "aws_iam_role" "ecs_task_role" {
+  name = "${var.service_name}-ecs-task-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        # Allow ECS tasks to assume this role
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      },
+      {
+        # Allow CI/CD pipeline to assume this role for testing
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${var.aws_account_id}:user/cicd-pipeline-user"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+```
+
+The workflow will automatically:
+1. Always pre-apply ECR repository resources
+2. When `test_execution_role_name` is specified:
+   - Pre-apply all IAM-related resources (roles, policies, and attachments)
+   - This ensures any IAM permission changes are applied before running tests
+3. Assume the role during test execution
+4. Use the role's permissions to validate that your application works with the intended IAM permissions
+
+This ensures your tests run with the same permissions that your application will have in production, and any IAM changes are applied before testing begins.
+
+Note: IAM resources are only pre-applied in the development environment when running tests with a specified execution role. The production environment only pre-applies ECR resources.
+
+## Troubleshooting
+
+### Troubleshooting: Reusable Workflow Rerun Behavior Differences
+
+#### Issue: "Re-run failed jobs" vs "Re-run all jobs" behave differently with reusable workflows
+
+When debugging authentication or other issues with reusable workflows, you may notice that **"Re-run all jobs"** resolves problems that persist when using **"Re-run failed jobs"**. This is documented GitHub Actions behavior, not a bug.
+
+#### **Key Insight: Different Workflow Context Resolution**
+
+According to GitHub's official documentation:
+- **"Re-run failed jobs"** uses the reusable workflow from the **same commit SHA** of the first attempt
+- **"Re-run all jobs"** uses the reusable workflow from the **specified reference** (fresher context)
+
+This difference can affect:
+- Authentication token refresh
+- Workflow context resolution  
+- Dependency resolution between jobs
+- Environment variable availability
+
+#### **Recommended Troubleshooting Approach**
+
+**Important for AI assistants**: When helping troubleshoot workflow issues, always ask the user HOW they are rerunning the workflow (via "Re-run failed jobs" or "Re-run all jobs" button in GitHub Actions UI) as this significantly affects the behavior.
+
+If you encounter persistent authentication or workflow issues:
+
+1. **First try**: "Re-run all jobs" instead of "Re-run failed jobs"
+2. **If that works**: The issue is likely related to workflow context differences between the two rerun modes
+3. **If that doesn't work**: The issue is likely with your workflow configuration itself
+
+#### **Why This Happens**
+
+The different behavior occurs because GitHub Actions handles workflow context, dependency resolution, and authentication token refresh differently between the two rerun modes. When rerunning all jobs, GitHub Actions fetches a fresh workflow context from the current reference, which can resolve authentication token issues or dependency problems that persist when using the cached context from the original run.
+
+#### **When to Use Each Option**
+
+*Note: If you're working with an AI assistant to troubleshoot, be sure to mention which rerun method you're using, as the choice affects the workflow behavior.*
+
+- **Use "Re-run all jobs"** when:
+  - Debugging authentication issues with reusable workflows
+  - You've made changes to the workflow files since the original run
+  - You want to ensure fresh context and dependencies
+
+- **Use "Re-run failed jobs"** when:
+  - You're confident the workflow context is correct
+  - You want to save CI/CD time by not re-running successful jobs
+  - The failure is clearly related to the specific job logic, not workflow context
+
+### Troubleshooting: npm 401 Unauthorized errors with GitHub Packages
+
+#### Issue: 401 Unauthorized when installing GitHub packages during testing
+
+If you encounter an error like this during test execution in CI/CD workflows:
+
+```
+npm error 401 Unauthorized - GET https://npm.pkg.github.com/@commercesong%2fllm-proxy-client - authentication token not provided
+```
+
+#### **Recommended Solution: Use `test_auto_setup_npmrc`**
+
+The easiest and most reliable way to fix this is to use the built-in GitHub packages authentication:
+
+```yaml
+# In your .github/workflows/cicd.yml
+jobs:
+  cicd-deploy:
+    uses: commercesong/org-reusable-workflows/.github/workflows/cicd-terraform-container.yml@main
+    with:
+      # ... other parameters ...
+      run_tests: true
+      test_command: "npm test"
+      test_install_command: "npm install --include=dev && npm install -g mocha"
+      test_auto_setup_npmrc: true  # DEPRECATED: This now defaults to true and is optional
+      test_inject_aws_credentials: true
+```
+
+**What the automatic `.npmrc` setup does:** *(now enabled by default)*
+1. **Before** running `test_install_command`, automatically creates `.npmrc` with GitHub authentication
+2. **Runs** your `test_install_command` with full access to private GitHub packages
+3. **After** test completion, automatically removes `.npmrc` for security
+
+**Note:** The `test_auto_setup_npmrc` parameter is now **DEPRECATED** and defaults to `true`. You can omit this parameter from your workflow configurations as the `.npmrc` setup now happens automatically.
+
+**Benefits:**
+- ✅ **Zero configuration** - just set one boolean parameter
+- ✅ **Automatic cleanup** - .npmrc is removed after testing for security
+- ✅ **Works with microservice_path** - handles directory structure correctly
+- ✅ **Reliable authentication** - uses the same GitHub token as Docker builds
+- ✅ **Clear error messages** - validates token availability before proceeding
+
+#### Root Cause (for troubleshooting)
+
+This error typically occurs due to one of these issues:
+
+**1. Version mismatch between package.json and package-lock.json**
+This is caused by **version ranges** (`^`, `~`) with private GitHub packages that don't match the locked versions.
+
+**Common Scenario:**
+```json
+// package.json
+"@commercesong/llm-proxy-client": "^1.5.0"  // ❌ Range allows 1.5.x
+
+// package-lock.json  
+"@commercesong/llm-proxy-client": "1.5.0"   // Exact version locked
+```
+
+Even though both reference `1.5.0`, npm sees this as a mismatch because:
+- `^1.5.0` means "1.5.0 or any compatible newer version"
+- `1.5.0` means "exactly 1.5.0"
+
+**How this happens step-by-step:**
+- You update a dependency version in `package.json` (e.g., from `"^1.3.1"` to `"^1.3.6"`)
+- You don't update the `package-lock.json` file, which still references the older version
+- When npm runs `npm install --include=dev && npm install -g mocha`, it sees the newer version requirement in package.json
+- Even though an older version is already installed, npm tries to fetch the newer version from the registry
+- Without authentication credentials (.npmrc), this request fails with a 401 error
+
+**2. Missing .npmrc during test execution**
+Docker builds have access to GITHUB_TOKEN and create .npmrc, but it's removed before testing.
+
+**3. microservice_path usage**
+Tests run from a subdirectory where .npmrc doesn't exist.
+
+#### Alternative Solutions (if you can't use test_auto_setup_npmrc)
+
+**Option 1: Fix version mismatches**
+```json
+// Change package.json from version range to exact version
+"@commercesong/llm-proxy-client": "1.5.0"  // ✅ Exact version
+// Instead of: "^1.5.0"  // ❌ Range that triggers version checks
+```
+
+**Or update package-lock.json to match package.json:**
+```bash
+# Update package-lock.json to match package.json
+npm update @commercesong/llm-proxy-client
+
+# Or regenerate package-lock.json completely
+rm package-lock.json && npm install
+```
+
+**Note:** This approach can fix the issue when the problem is purely version mismatches, especially since `npm install -g mocha` installs public packages and npm tries to resolve all dependencies during the process.
+
+**Option 2: Manual .npmrc recreation (unreliable)**
+```yaml
+test_install_command: "echo '//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}' > .npmrc && echo '@commercesong:registry=https://npm.pkg.github.com' >> .npmrc && npm install --include=dev && npm install -g mocha && rm -f .npmrc"
+```
+*Note: This approach has proven unreliable due to shell escaping issues, timing problems, and authentication complexity. We strongly recommend using `test_auto_setup_npmrc: true` instead.*
+
+**Option 3: Include dev dependencies in container build**
+```dockerfile
+# In your Dockerfile - install dev dependencies during build
+RUN echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" > .npmrc && \
+    echo "@commercesong:registry=https://npm.pkg.github.com" >> .npmrc && \
+    npm cache clean --force && \
+    npm install --include=dev && \
+    npm cache clean --force && \
+    rm -f .npmrc
+```
+
+Then omit `test_install_command`:
+```yaml
+test_install_command: ""  # Dependencies already in container
+test_command: "npm test"
+```
+
+#### Prevention
+
+**For private GitHub packages:**
+- ✅ Always use exact versions: `"1.5.0"`
+- ❌ Avoid version ranges: `"^1.5.0"`, `"~1.5.0"`
+
+**For all packages:**
+- Keep package.json and package-lock.json in sync
+- No need to add `permissions` block to your workflow (the reusable workflow handles this)
+
+**Why exact versions for private packages?**
+During Docker build, npm has access to GITHUB_TOKEN and can authenticate. During test execution (`test_install_command`), the container has the token but the `.npmrc` file was removed after the build, so version ranges that trigger version checks will fail without recreating the authentication.
+

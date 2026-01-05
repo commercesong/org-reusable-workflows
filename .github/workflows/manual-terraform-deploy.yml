@@ -1,0 +1,171 @@
+name: Manual Deploy Workflow
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment to deploy to (e.g., dev, prod)'
+        required: true
+        type: string
+      commit_hash:
+        description: 'GitHub SHA to deploy'
+        required: true
+        type: string
+      aws_region:
+        description: 'AWS Region'
+        required: true
+        type: string
+        default: 'us-east-1'
+      image_name:
+        description: 'Docker image name'
+        required: true
+        type: string
+      tf_backend_config_key:
+        description: 'Terraform backend config key'
+        required: true
+        type: string
+    secrets:
+      aws_account_id_dev:
+        description: 'AWS Account ID for Dev'
+        required: true
+      aws_access_key_id_dev:
+        description: 'AWS Access Key ID for Dev'
+        required: true
+      aws_secret_access_key_dev:
+        description: 'AWS Secret Access Key for Dev'
+        required: true
+      aws_account_id_prod:
+        description: 'AWS Account ID for Prod'
+        required: true
+      aws_access_key_id_prod:
+        description: 'AWS Access Key ID for Prod'
+        required: true
+      aws_secret_access_key_prod:
+        description: 'AWS Secret Access Key for Prod'
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ inputs.aws_region }}
+      AWS_ENV: ${{ inputs.environment }}
+      IMAGE_NAME: ${{ inputs.image_name }}
+      TF_BACKEND_CONFIG_KEY: ${{ inputs.tf_backend_config_key }}
+    steps:
+      - name: Set AWS environment variables based on AWS_ENV
+        run: |
+          echo "Setting AWS credentials for $AWS_ENV environment"
+          if [ "$AWS_ENV" == "dev" ]; then
+            echo "AWS_ACCOUNT_ID=${{ secrets.aws_account_id_dev }}" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.aws_access_key_id_dev }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.aws_secret_access_key_dev }}" >> $GITHUB_ENV
+          elif [ "$AWS_ENV" == "prod" ]; then
+            echo "AWS_ACCOUNT_ID=${{ secrets.aws_account_id_prod }}" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.aws_access_key_id_prod }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.aws_secret_access_key_prod }}" >> $GITHUB_ENV
+          else
+            echo "ERROR: Unknown AWS_ENV $AWS_ENV"
+            exit 1
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}  # Refers to the calling repository
+          ref: ${{ inputs.commit_hash }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.8.3
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Clean AWS_PROFILE from environment files
+        run: |
+          echo "Cleaning AWS_PROFILE from environment files..."
+          find "terraform" -type f \( -name "*.env" -o -name ".env*" \) -print0 | while IFS= read -r -d '' file; do
+            echo "Processing file: $file"
+            temp_file=$(mktemp)
+            if ! grep -v "^AWS_PROFILE=" "$file" > "$temp_file" && [ $? -ne 1 ]; then
+              echo "::error::Failed to process file: $file"
+              rm "$temp_file"
+              exit 1
+            fi
+            mv "$temp_file" "$file"
+            echo "Cleaned AWS_PROFILE from $file"
+          done
+
+      - name: Deploy to environment
+        run: |
+          cd terraform
+          terraform init \
+              -backend-config="bucket=terraform-state-${{ env.AWS_ACCOUNT_ID }}" \
+              -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
+              -backend-config="region=${{ env.AWS_REGION }}" \
+              -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
+          terraform apply -auto-approve -var="image_tag=${{ inputs.commit_hash }}" -var-file="env-${{ env.AWS_ENV }}.tfvars"
+  
+      - name: Tag image as active after successful deployment
+        if: ${{ success() }}
+        env:
+          REPOSITORY_URI: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}
+          COMMIT_HASH: ${{ inputs.commit_hash }}
+        run: |
+          # Define tags
+          DEPLOYED_TAG="deployedon-$(date +%Y%m%d%H%M%S)"
+          USER_TAG="deployedby-$(git log -1 --pretty=format:'%an' | tr ' ' '-')"
+
+          # Debug output
+          echo "REPOSITORY_URI: $REPOSITORY_URI"
+          echo "Commit hash: $COMMIT_HASH"
+          echo "Deployed tag: $DEPLOYED_TAG"
+          echo "User tag: $USER_TAG"
+
+          # Pull the specific image by commit hash
+          echo "Pulling the image with commit hash..."
+          docker pull $REPOSITORY_URI:$COMMIT_HASH
+
+          # Check if the pulled image exists locally
+          echo "Checking if image exists locally..."
+          IMAGE_ID=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "$REPOSITORY_URI:$COMMIT_HASH" || true)
+          if [ -n "$IMAGE_ID" ]; then
+            echo "Image with commit hash found locally: $IMAGE_ID"
+          else
+            echo "Error: Image with commit hash not explicitly found in docker images list."
+          fi
+
+          # Check for valid tag format
+          echo "Checking tag formats..."
+          if [[ ! "$DEPLOYED_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "Error: Invalid deployed tag format: $DEPLOYED_TAG"
+            exit 1
+          fi
+
+          if [[ ! "$USER_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "Error: Invalid user tag format: $USER_TAG"
+            exit 1
+          fi
+
+          # Tag the image
+          echo "Tagging image..."
+          docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:$DEPLOYED_TAG
+          docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:$USER_TAG
+          docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:active
+
+          # Push tags to ECR
+          echo "Pushing tags to ECR..."
+          docker push $REPOSITORY_URI:$DEPLOYED_TAG
+          docker push $REPOSITORY_URI:$USER_TAG
+          docker push $REPOSITORY_URI:active
+

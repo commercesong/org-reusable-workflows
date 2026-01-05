@@ -1,0 +1,664 @@
+name: CI/CD Terraform Container Workflow
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: 'Docker image name'
+        required: true
+        type: string
+      tf_backend_config_key:
+        description: 'Terraform backend config key'
+        required: true
+        type: string
+      aws_region:
+        description: 'AWS Region'
+        required: true
+        type: string
+        default: "us-east-1"
+      commit_hash:
+        description: 'Commit hash to use for tagging and deployment'
+        required: true
+        type: string
+      ref:
+        description: 'Branch reference from the calling workflow'
+        required: true
+        type: string
+      platform:
+        description: 'Platform for Docker build (e.g., linux/amd64, linux/arm64)'
+        required: false
+        type: string
+        default: "linux/arm64"
+      microservice_path:
+        description: 'Path to the microservice directory (optional)'
+        required: false
+        type: string
+        default: '.'
+      run_tests:
+        description: 'Run tests in Docker container'
+        required: false
+        type: boolean
+        default: false
+      test_env:
+        description: 'Test environment variables in JSON format'
+        required: false
+        type: string
+      test_command:
+        description: 'Test command'
+        required: false
+        type: string
+      test_install_command:
+        description: 'Command to install test dependencies'
+        required: false
+        type: string
+      test_auto_setup_npmrc:
+        description: 'Automatically create .npmrc for GitHub packages authentication before test_install_command (DEPRECATED: now defaults to true, this parameter is optional and will be ignored in future versions)'
+        required: false
+        type: boolean
+        default: true
+      test_inject_aws_credentials:
+        description: 'Inject AWS credentials into the test container'
+        required: false
+        type: boolean
+        default: false
+      test_env_file:
+        description: 'Path to environment file for testing'
+        required: false
+        type: string
+      test_secret_env_ssm_paths:
+        description: 'JSON array of SSM parameter paths for secret environment variables'
+        required: false
+        type: string
+      test_execution_role_name:
+        description: 'Role name (not ARN) to assume for running tests'
+        required: false
+        type: string
+      disable_docker_cache:
+        description: 'Force Docker to build without using cache'
+        required: false
+        type: boolean
+        default: false
+      job_timeout_minutes:
+        description: 'Timeout for each job in minutes (default: 60)'
+        required: false
+        type: number
+        default: 60
+    secrets:
+      aws_account_id_dev:
+        description: 'AWS Account ID for Dev'
+        required: true
+      aws_access_key_id_dev:
+        description: 'AWS Access Key ID for Dev'
+        required: true
+      aws_secret_access_key_dev:
+        description: 'AWS Secret Access Key for Dev'
+        required: true
+      aws_account_id_prod:
+        description: 'AWS Account ID for Prod'
+        required: true
+      aws_access_key_id_prod:
+        description: 'AWS Access Key ID for Prod'
+        required: true
+      aws_secret_access_key_prod:
+        description: 'AWS Secret Access Key for Prod'
+        required: true
+
+env:
+  IMAGE_NAME: ${{ inputs.image_name }}
+  TF_BACKEND_CONFIG_KEY: ${{ inputs.tf_backend_config_key }}
+  AWS_REGION: ${{ inputs.aws_region }}
+  COMMIT_HASH: ${{ inputs.commit_hash }}
+
+# set GITHUB_TOKEN permissions
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  build-and-push-dev:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    if: inputs.ref == 'refs/heads/develop' || startsWith(inputs.ref, 'refs/heads/feature/')
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_dev }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_dev }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_dev }}
+      AWS_ENV: dev
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}  # Refers to the calling repository
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          # known issue with 1.9.7 not loading plugins when i use locally
+          terraform_version: 1.8.3
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Ensure ECR repo has been created
+        run: |
+          cd ${{ inputs.microservice_path }}/terraform
+          terraform init -backend-config="bucket=terraform-state-${{ env.AWS_ACCOUNT_ID }}" \
+                          -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
+                          -backend-config="region=${{ env.AWS_REGION }}" \
+                          -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
+          
+          # Extract ECR resource names
+          echo "Finding ECR resources..."
+          targets=$(grep -r -E 'resource "aws_ecr_repository" "[^"]+"' . | awk '{gsub(/"/, "", $2); gsub(/"/, "", $3); print "-target="$2 "." $3}' | tr '\n' ' ')
+          
+          echo "Found the following ECR resources to pre-apply:"
+          echo "$targets"
+          
+          # Apply ECR resources
+          terraform apply -auto-approve $targets -var-file="env-${{ env.AWS_ENV }}.tfvars"
+
+      - name: Ensure IAM resources exist if using test execution role
+        if: inputs.test_execution_role_name != ''
+        run: |
+          cd ${{ inputs.microservice_path }}/terraform
+          # Extract IAM-related resource names
+          echo "Finding IAM resources..."
+          targets=$(grep -r -E 'resource "(aws_iam_role|aws_iam_policy|aws_iam_role_policy|aws_iam_role_policy_attachment|aws_iam_policy_attachment)" "[^"]+"' . | awk '{gsub(/"/, "", $2); gsub(/"/, "", $3); print "-target="$2 "." $3}' | tr '\n' ' ')
+          
+          echo "Found the following IAM resources to pre-apply:"
+          echo "$targets"
+          
+          # Apply IAM resources
+          terraform apply -auto-approve $targets -var-file="env-${{ env.AWS_ENV }}.tfvars"
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      # The setup-qemu-action is used to enable multi-architecture builds.
+      # When building ARM64 images on AMD64 GitHub runners, we need QEMU for architecture emulation.
+      # This is a critical component that allows us to build ARM64 Lambda container images on GitHub's AMD64 runners.
+      # The action uses Docker's official QEMU binaries through the tonistiigi/binfmt image,
+      # which is maintained by Docker core maintainers and is the standard solution for multi-arch builds.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      # Buildx is needed for multi-architecture builds
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Clean AWS_PROFILE from environment files
+        run: |
+          echo "Cleaning AWS_PROFILE from environment files..."
+          find "${{ inputs.microservice_path }}" -type f \( -name "*.env" -o -name ".env*" \) -print0 | while IFS= read -r -d '' file; do
+            echo "Processing file: $file"
+            echo -e "\nBefore cleaning, file contents:"
+            cat "$file"
+            temp_file=$(mktemp)
+            if ! grep -v "^AWS_PROFILE=" "$file" > "$temp_file" && [ $? -ne 1 ]; then
+              echo "::error::Failed to process file: $file"
+              rm "$temp_file"
+              exit 1
+            fi
+            mv "$temp_file" "$file"
+            echo -e "\nAfter cleaning, file contents:"
+            cat "$file"
+            echo -e "\nCleaned AWS_PROFILE from $file"
+          done
+
+      # NOTE: The calling repository must explicitly be granted access to the GitHub package 
+      # in the package settings. This cannot be configured through infrastructure-as-code 
+      # or automation; it must be manually configured in the GitHub UI. To do this, navigate 
+      # to the package in GitHub Packages, click "Add Repository," and add the calling repository. 
+      # This is required for the repository to use the GITHUB_TOKEN to authenticate and install 
+      # the package via .npmrc during the build process.
+      - name: Build Docker image
+        run: |
+          echo "Building the Docker image with platform ${{ inputs.platform }}..."
+          docker buildx build \
+            --platform ${{ inputs.platform }} \
+            ${{ inputs.disable_docker_cache && '--no-cache' || '' }} \
+            --build-arg GITHUB_USERNAME=${{ github.actor }} \
+            --build-arg GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+            -t ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:latest \
+            -t ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:${{ env.COMMIT_HASH }} \
+            --load ${{ inputs.microservice_path }}
+          echo "Docker build completed."
+
+      - name: Run tests in Docker container
+        if: inputs.run_tests
+        env:
+          TEST_ENV: ${{ inputs.test_env }}
+        run: |
+          # Create temporary env files from the input JSON
+          echo '${{ inputs.test_env }}' | jq -r 'to_entries[] | "\(.key)=\(.value)"' > temp_env.env
+          
+          # Handle .npmrc setup for GitHub packages if enabled
+          NPMRC_SETUP_COMMAND=""
+          if [ "${{ inputs.test_auto_setup_npmrc }}" = "true" ]; then
+            echo "Auto-setup .npmrc for GitHub packages is enabled"
+            # Validate GitHub token
+            if [ -z "${{ secrets.GITHUB_TOKEN }}" ]; then
+              echo "::error::test_auto_setup_npmrc is enabled but GITHUB_TOKEN is not available"
+              exit 1
+            fi
+            
+            # Create .npmrc setup command
+            NPMRC_SETUP_COMMAND="echo 'Creating .npmrc for GitHub packages authentication...' && "
+            NPMRC_SETUP_COMMAND+="echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' > .npmrc && "
+            NPMRC_SETUP_COMMAND+="echo '@commercesong:registry=https://npm.pkg.github.com' >> .npmrc && "
+            NPMRC_SETUP_COMMAND+="echo '.npmrc created successfully' && "
+          fi
+          
+          # Combine all commands
+          COMBINED_COMMAND=""
+          if [ -n "$NPMRC_SETUP_COMMAND" ]; then
+            COMBINED_COMMAND="$NPMRC_SETUP_COMMAND"
+          fi
+          if [ -n "${{ inputs.test_install_command }}" ]; then
+            COMBINED_COMMAND+="${{ inputs.test_install_command }} && "
+          fi
+          COMBINED_COMMAND+="${{ inputs.test_command }}"
+          
+          # Clean up .npmrc if we created it
+          if [ "${{ inputs.test_auto_setup_npmrc }}" = "true" ]; then
+            COMBINED_COMMAND+=" && rm -f .npmrc"
+          fi
+          
+          # Handle test execution role if specified
+          if [ -n "${{ inputs.test_execution_role_name }}" ]; then
+            ROLE_ARN="arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ inputs.test_execution_role_name }}"
+            echo "Attempting to assume role: $ROLE_ARN"
+            
+            # Use admin credentials to assume the role
+            if ! ASSUMED_CREDS=$(aws sts assume-role \
+              --role-arn "$ROLE_ARN" \
+              --role-session-name "GithubActionsTest" \
+              --duration-seconds 3600 \
+              --output json); then
+              
+              # Debug output using admin credentials
+              echo "::warning::Role assumption failed. Running diagnostics..."
+              aws sts get-caller-identity
+              aws iam get-role --role-name "${{ inputs.test_execution_role_name }}"
+              aws iam list-attached-role-policies --role-name "${{ inputs.test_execution_role_name }}"
+              aws iam simulate-principal-policy \
+                --policy-source-arn "arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:user/cicd-pipeline-user" \
+                --action-names sts:AssumeRole \
+                --resource-arns "$ROLE_ARN"
+              
+              echo "::warning::Role assumption failed. This usually means the role's trust policy needs to be updated."
+              echo "::warning::Add this block to your role's trust policy (in addition to the service principal):"
+              echo "::warning::{\"Effect\": \"Allow\", \"Principal\": {\"AWS\": \"arn:aws:iam::\${account_id}:user/cicd-pipeline-user\"}, \"Action\": \"sts:AssumeRole\"}"
+              echo "::warning::See the README for full implementation details with Terraform."
+              exit 1
+            fi
+            
+            # Parse assumed role credentials (but don't export them to environment)
+            CONTAINER_AWS_ACCESS_KEY_ID=$(echo "$ASSUMED_CREDS" | jq -r '.Credentials.AccessKeyId')
+            CONTAINER_AWS_SECRET_ACCESS_KEY=$(echo "$ASSUMED_CREDS" | jq -r '.Credentials.SecretAccessKey')
+            CONTAINER_AWS_SESSION_TOKEN=$(echo "$ASSUMED_CREDS" | jq -r '.Credentials.SessionToken')
+            
+            # Verify we got valid credentials
+            if [ -z "$CONTAINER_AWS_ACCESS_KEY_ID" ] || [ -z "$CONTAINER_AWS_SECRET_ACCESS_KEY" ] || [ -z "$CONTAINER_AWS_SESSION_TOKEN" ]; then
+              echo "::error::Failed to parse assumed role credentials"
+              exit 1
+            fi
+            
+            # These credentials will only be used inside the Docker container
+            AWS_CRED_ARGS="-e AWS_ACCESS_KEY_ID=$CONTAINER_AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$CONTAINER_AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN=$CONTAINER_AWS_SESSION_TOKEN -e AWS_REGION=${{ env.AWS_REGION }}"
+            echo "Successfully assumed test execution role"
+          elif [ "${{ inputs.test_inject_aws_credentials }}" = "true" ]; then
+            AWS_CRED_ARGS="-e AWS_ACCESS_KEY_ID=${{ env.AWS_ACCESS_KEY_ID }} -e AWS_SECRET_ACCESS_KEY=${{ env.AWS_SECRET_ACCESS_KEY }} -e AWS_REGION=${{ env.AWS_REGION }}"
+            echo "Using admin credentials for testing"
+          else
+            AWS_CRED_ARGS=""
+            echo "Not injecting AWS credentials into the test container"
+          fi
+          
+          # Prepare env file arguments
+          ENV_FILE_ARGS=""
+          if [ -n "${{ inputs.test_env_file }}" ]; then
+            ENV_FILE_PATH="${{ inputs.microservice_path }}/${{ inputs.test_env_file }}"
+            if [ -f "$ENV_FILE_PATH" ]; then
+              # Create a temporary file without AWS_PROFILE
+              TEMP_ENV_FILE=$(mktemp)
+              # Filter out AWS_PROFILE lines (grep returns 1 if no lines match, which is fine)
+              if ! grep -v "^AWS_PROFILE=" "$ENV_FILE_PATH" > "$TEMP_ENV_FILE" && [ $? -ne 1 ]; then
+                echo "::error::Failed to filter AWS_PROFILE from file: $ENV_FILE_PATH"
+                rm "$TEMP_ENV_FILE"
+                exit 1
+              fi
+              ENV_FILE_ARGS="--env-file $TEMP_ENV_FILE"
+              echo "Using filtered environment file (AWS_PROFILE removed if present)"
+            else
+              echo "::error::Environment file not found at: $ENV_FILE_PATH"
+              exit 1
+            fi
+          fi
+          
+          # Prepare SSM parameters if provided
+          SSM_ENV_ARGS=""
+          if [ -n "${{ inputs.test_secret_env_ssm_paths }}" ]; then
+            echo "Reading SSM parameters using CI/CD admin credentials..."
+            SSM_PATHS=$(echo '${{ inputs.test_secret_env_ssm_paths }}' | jq -r '.[]')
+            for SSM_PATH in $SSM_PATHS; do
+              echo "Attempting to read SSM parameter: $SSM_PATH"
+              # Use AWS CLI with the original admin credentials
+              SSM_VALUE=$(aws ssm get-parameter --name "$SSM_PATH" --with-decryption --query "Parameter.Value" --output text)
+              if [ $? -eq 0 ]; then
+                ENV_NAME=$(basename "$SSM_PATH" | tr '[:lower:]' '[:upper:]')
+                SSM_ENV_ARGS="$SSM_ENV_ARGS -e $ENV_NAME=$SSM_VALUE"
+                echo "Successfully read SSM parameter: $SSM_PATH"
+              else
+                echo "Failed to read SSM parameter: $SSM_PATH"
+                exit 1
+              fi
+            done
+          fi
+          
+          # Run the combined commands in the Docker container and capture exit code
+          docker run --rm \
+            --platform ${{ inputs.platform }} \
+            -v ${{ github.workspace }}:/var/task \
+            -w /var/task/${{ inputs.microservice_path }} \
+            -e AWS_ENV=${{ env.AWS_ENV }} \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            $AWS_CRED_ARGS \
+            --env-file temp_env.env \
+            $ENV_FILE_ARGS \
+            $SSM_ENV_ARGS \
+            --entrypoint="" \
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:latest \
+            sh -c "set -e; $COMBINED_COMMAND; echo \$? > /var/task/test_exit_code.txt"
+          
+          # Capture the test exit code
+          TEST_EXIT_CODE=$(cat test_exit_code.txt)
+          rm -f test_exit_code.txt
+          
+          # Clean up temporary env files with debug output
+          echo "Cleaning up temporary files..."
+          if [ -f temp_env.env ]; then
+            echo "Removing temp_env.env"
+            rm -f temp_env.env || echo "Warning: Failed to remove temp_env.env"
+          else
+            echo "temp_env.env not found"
+          fi
+          
+          if [ -n "${{ inputs.test_env_file }}" ] && [ -f "$TEMP_ENV_FILE" ]; then
+            echo "Removing $TEMP_ENV_FILE"
+            rm -f "$TEMP_ENV_FILE" || echo "Warning: Failed to remove $TEMP_ENV_FILE"
+          else
+            echo "$TEMP_ENV_FILE not found or not specified"
+          fi
+          
+          # Exit with the test exit code, regardless of cleanup success
+          if [ "$TEST_EXIT_CODE" -eq 0 ]; then
+            echo "Tests passed successfully"
+            exit 0
+          else
+            echo "Tests failed with exit code $TEST_EXIT_CODE"
+            exit $TEST_EXIT_CODE
+          fi
+
+      - name: Push Docker image
+        if: success()
+        run: |
+          echo "Tagging and pushing the Docker image..."
+          # Tag the image with the commit hash
+          docker tag ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:latest ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:${{ env.COMMIT_HASH }}
+          
+          # Push both tags
+          docker push ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:${{ env.COMMIT_HASH }}
+          echo "Docker push completed."
+
+      - name: Verify image in ECR
+        if: success()
+        run: |
+          echo "Verifying the image using describe-images..."
+          aws ecr describe-images --repository-name ${{ env.IMAGE_NAME }} --image-ids imageTag=latest imageTag=${{ env.COMMIT_HASH }}
+          echo "Retrieving image manifest using batch-get-image for detailed platform information..."
+          aws ecr batch-get-image --repository-name ${{ env.IMAGE_NAME }} --image-ids imageTag=${{ env.COMMIT_HASH }} --query 'images[].imageManifest' --output text
+
+  deploy-dev:
+    needs: build-and-push-dev
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_dev }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_dev }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_dev }}
+      AWS_ENV: dev
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}  # Refers to the calling repository
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.0.0  # Specify your desired Terraform version here
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+  
+      - name: Deploy to environment
+        run: |
+          cd ${{ inputs.microservice_path }}/terraform
+          terraform init \
+              -backend-config="bucket=terraform-state-${{ env.AWS_ACCOUNT_ID }}" \
+              -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
+              -backend-config="region=${{ env.AWS_REGION }}" \
+              -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
+          terraform apply -auto-approve -var="image_tag=${{ env.COMMIT_HASH }}" -var-file="env-${{ env.AWS_ENV }}.tfvars"
+  
+      - name: Tag image as active after successful deployment
+        if: ${{ success() }}
+        run: |
+          export REPOSITORY_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}
+          export IMAGE_TAG=${{ env.COMMIT_HASH }}
+          
+          # Pull the image by tag
+          docker pull $REPOSITORY_URI:$IMAGE_TAG
+          
+          # Tag the image with 'active'
+          docker tag $REPOSITORY_URI:$IMAGE_TAG $REPOSITORY_URI:active
+          
+          # Push the 'active' tag to ECR
+          docker push $REPOSITORY_URI:active
+
+  build-and-push-prod:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    if: inputs.ref == 'refs/heads/main' || inputs.ref == 'refs/heads/master'
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_prod }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_prod }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_prod }}
+      AWS_ENV: prod
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}  # Refers to the calling repository
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.0.0  # Specify your desired Terraform version here
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Ensure ECR repo and IAM roles have been created
+        run: |
+          cd ${{ inputs.microservice_path }}/terraform
+          terraform init -backend-config="bucket=terraform-state-${{ env.AWS_ACCOUNT_ID }}" \
+                          -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
+                          -backend-config="region=${{ env.AWS_REGION }}" \
+                          -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
+          
+          # Extract ECR and all IAM-related resource names from terraform files
+          echo "Finding ECR and IAM resources..."
+          targets=$(grep -r -E 'resource "(aws_ecr_repository|aws_iam_role|aws_iam_policy|aws_iam_role_policy|aws_iam_role_policy_attachment|aws_iam_policy_attachment)" "[^"]+"' . | awk '{gsub(/"/, "", $2); gsub(/"/, "", $3); print "-target="$2 "." $3}' | tr '\n' ' ')
+          
+          echo "Found the following resources to pre-apply:"
+          echo "$targets"
+          
+          # Apply ECR and IAM resources
+          terraform apply -auto-approve $targets -var-file="env-${{ env.AWS_ENV }}.tfvars"
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      # The setup-qemu-action is used to enable multi-architecture builds.
+      # When building ARM64 images on AMD64 GitHub runners, we need QEMU for architecture emulation.
+      # This is a critical component that allows us to build ARM64 Lambda container images on GitHub's AMD64 runners.
+      # The action uses Docker's official QEMU binaries through the tonistiigi/binfmt image,
+      # which is maintained by Docker core maintainers and is the standard solution for multi-arch builds.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      # Buildx is needed for multi-architecture builds
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Clean AWS_PROFILE from environment files
+        run: |
+          echo "Cleaning AWS_PROFILE from environment files..."
+          find "${{ inputs.microservice_path }}" -type f \( -name "*.env" -o -name ".env*" \) -print0 | while IFS= read -r -d '' file; do
+            echo "Processing file: $file"
+            echo -e "\nBefore cleaning, file contents:"
+            cat "$file"
+            temp_file=$(mktemp)
+            if ! grep -v "^AWS_PROFILE=" "$file" > "$temp_file" && [ $? -ne 1 ]; then
+              echo "::error::Failed to process file: $file"
+              rm "$temp_file"
+              exit 1
+            fi
+            mv "$temp_file" "$file"
+            echo -e "\nAfter cleaning, file contents:"
+            cat "$file"
+            echo -e "\nCleaned AWS_PROFILE from $file"
+          done
+
+      # NOTE: The calling repository must explicitly be granted access to the GitHub package 
+      # in the package settings. This cannot be configured through infrastructure-as-code 
+      # or automation; it must be manually configured in the GitHub UI. To do this, navigate 
+      # to the package in GitHub Packages, click "Add Repository," and add the calling repository. 
+      # This is required for the repository to use the GITHUB_TOKEN to authenticate and install 
+      # the package via .npmrc during the build process.
+      - name: Build Docker image
+        run: |
+          echo "Building the Docker image with platform ${{ inputs.platform }}..."
+          docker buildx build \
+            --platform ${{ inputs.platform }} \
+            ${{ inputs.disable_docker_cache && '--no-cache' || '' }} \
+            --build-arg GITHUB_USERNAME=${{ github.actor }} \
+            --build-arg GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+            -t ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:latest \
+            -t ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:${{ env.COMMIT_HASH }} \
+            --load ${{ inputs.microservice_path }}
+          echo "Docker build completed."
+
+      - name: Push Docker image
+        if: success()
+        run: |
+          echo "Tagging and pushing the Docker image..."
+          # Push both tags
+          docker push ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}:${{ env.COMMIT_HASH }}
+          echo "Docker push completed."
+
+      - name: Verify image in ECR
+        if: success()
+        run: |
+          echo "Verifying the image using describe-images..."
+          aws ecr describe-images --repository-name ${{ env.IMAGE_NAME }} --image-ids imageTag=latest imageTag=${{ env.COMMIT_HASH }}
+          echo "Retrieving image manifest using batch-get-image for detailed platform information..."
+          aws ecr batch-get-image --repository-name ${{ env.IMAGE_NAME }} --image-ids imageTag=${{ env.COMMIT_HASH }} --query 'images[].imageManifest' --output text
+
+  deploy-prod:
+    needs: build-and-push-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_prod }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_prod }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_prod }}
+      AWS_ENV: prod
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}  # Refers to the calling repository
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.0.0  # Specify your desired Terraform version here
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+  
+      - name: Deploy to environment
+        run: |
+          cd ${{ inputs.microservice_path }}/terraform
+          terraform init \
+              -backend-config="bucket=terraform-state-${{ env.AWS_ACCOUNT_ID }}" \
+              -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
+              -backend-config="region=${{ env.AWS_REGION }}" \
+              -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
+          terraform apply -auto-approve -var="image_tag=${{ env.COMMIT_HASH }}" -var-file="env-${{ env.AWS_ENV }}.tfvars"
+  
+      - name: Tag image as active after successful deployment
+        if: ${{ success() }}
+        run: |
+          export REPOSITORY_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_NAME }}
+          export IMAGE_TAG=${{ env.COMMIT_HASH }}
+          
+          # Pull the image by tag
+          docker pull $REPOSITORY_URI:$IMAGE_TAG
+          
+          # Tag the image with 'active'
+          docker tag $REPOSITORY_URI:$IMAGE_TAG $REPOSITORY_URI:active
+          
+          # Push the 'active' tag to ECR
+          docker push $REPOSITORY_URI:active
