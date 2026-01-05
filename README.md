@@ -10,10 +10,7 @@ This workflow automates the continuous integration and continuous deployment (CI
 ### 2. Manual Terraform Deployment Workflow
 This workflow facilitates manual Terraform deployments with added checks and balances. It allows for environment-specific deployments with controlled, manual intervention, ensuring that deployments are carried out safely and intentionally.
 
-### 3. NPM Package Publishing Workflow
-This workflow automates the process of testing and publishing NPM packages to GitHub Packages. It ensures consistency in package versioning, runs tests with the appropriate AWS credentials, and publishes packages only when all validations pass.
-
-### 4. Terraform Infrastructure Workflow
+### 3. Terraform Infrastructure Workflow
 This workflow is designed for **pure Terraform infrastructure deployments** (no Docker containers involved). It's perfect for infrastructure modules like backup services, networking, or security configurations. The workflow provides plan-on-PR functionality, auto-deploys to dev, and auto-deploys to production on main branch merges (following org standard).
 
 ## Example Usage
@@ -139,67 +136,6 @@ jobs:
       aws_access_key_id_prod: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
       aws_secret_access_key_prod: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
 ```
-
-### Example Usage - NPM Package Publishing
-
-`.github/workflows/publish.yml`:
-```yaml
-name: Publish Package
-
-on:
-  push:
-    branches:
-      - main
-      - develop
-
-jobs:
-  publish:
-    uses: commercesong/org-reusable-workflows/.github/workflows/publish-npm-package.yml@main
-    with:
-      ref: ${{ github.ref }}
-      package_name: "user-data-client"
-      node_version: "20"
-      aws_region: "us-east-1"
-      run_tests: true
-      test_environment_variables: '{"LOG_LEVEL": "debug"}'
-    # Pass all repository secrets to reusable workflow (requires explicit listing in reusable workflow)
-    secrets: inherit
-```
-
-In this example, we've included the following parameters:
-
-- `ref`: The branch reference from the calling workflow.
-- `package_name`: The name of the NPM package (used for version checking).
-- `package_path`: (Optional) Path to the NPM package directory. Defaults to '.' (root directory).
-- `node_version`: (Optional) The Node.js version to use. Defaults to '20'.
-- `aws_region`: (Optional) The AWS region to use for AWS operations. Defaults to 'us-east-1'.
-- `run_tests`: (Optional) Whether to run tests. Defaults to 'true'.
-- `test_environment_variables`: (Optional) Environment variables to set during testing in JSON format.
-- `test_environment_secrets`: (Optional) Secret environment variables to set during testing in JSON format. Use this for sensitive values that should be passed as secrets from your repository.
-
-**Important Limitation - Secret Passing:**
-GitHub Actions doesn't support truly generic secret passing to reusable workflows. While `secrets: inherit` makes all secrets available to the reusable workflow, they must be **explicitly listed** in the reusable workflow's environment variables to be accessible during test execution.
-
-**To add a new test secret:**
-1. Add the secret as an environment variable in the reusable workflow's test step:
-   ```yaml
-   env:
-     YOUR_SECRET: ${{ secrets.YOUR_SECRET }}
-   ```
-2. Configure `YOUR_SECRET` as a repository secret in GitHub Actions settings
-3. Use `secrets: inherit` in your calling workflow
-
-This limitation means the reusable workflow isn't fully automatic and requires modification when new secrets are needed across different repositories.
-
-The workflow performs the following key operations:
-1. Runs tests with appropriate AWS credentials:
-   - For `main` branch: Tests run against AWS production environment with `AWS_ENV=prod`
-   - For all other branches (including `develop`): Tests run against AWS development environment with `AWS_ENV=dev`
-2. For the main branch only, it also runs the publish job:
-   - Verifies that the current package version is greater than the latest published version
-   - Publishes the package to GitHub Packages using the repository's GITHUB_TOKEN
-
-Note: All environment files (*.env and .env*) will be processed to remove AWS_PROFILE variables, as these can interfere with AWS credential configuration in CI/CD environments.
 
 ### Example Usage - Terraform Infrastructure
 
