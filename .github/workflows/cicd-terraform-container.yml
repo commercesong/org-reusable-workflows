@@ -87,20 +87,8 @@ on:
       aws_account_id_dev:
         description: 'AWS Account ID for Dev'
         required: true
-      aws_access_key_id_dev:
-        description: 'AWS Access Key ID for Dev'
-        required: true
-      aws_secret_access_key_dev:
-        description: 'AWS Secret Access Key for Dev'
-        required: true
       aws_account_id_prod:
         description: 'AWS Account ID for Prod'
-        required: true
-      aws_access_key_id_prod:
-        description: 'AWS Access Key ID for Prod'
-        required: true
-      aws_secret_access_key_prod:
-        description: 'AWS Secret Access Key for Prod'
         required: true
 
 env:
@@ -113,6 +101,7 @@ env:
 permissions:
   contents: read
   packages: read
+  id-token: write  # Required for OIDC authentication
 
 jobs:
   build-and-push-dev:
@@ -121,8 +110,6 @@ jobs:
     if: inputs.ref == 'refs/heads/develop' || startsWith(inputs.ref, 'refs/heads/feature/')
     env:
       AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_dev }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_dev }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_dev }}
       AWS_ENV: dev
     steps:
       - name: Checkout code
@@ -138,10 +125,9 @@ jobs:
           terraform_version: 1.8.3
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Ensure ECR repo has been created
@@ -290,13 +276,13 @@ jobs:
               aws iam get-role --role-name "${{ inputs.test_execution_role_name }}"
               aws iam list-attached-role-policies --role-name "${{ inputs.test_execution_role_name }}"
               aws iam simulate-principal-policy \
-                --policy-source-arn "arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:user/cicd-pipeline-user" \
+                --policy-source-arn "arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}" \
                 --action-names sts:AssumeRole \
                 --resource-arns "$ROLE_ARN"
               
               echo "::warning::Role assumption failed. This usually means the role's trust policy needs to be updated."
               echo "::warning::Add this block to your role's trust policy (in addition to the service principal):"
-              echo "::warning::{\"Effect\": \"Allow\", \"Principal\": {\"AWS\": \"arn:aws:iam::\${account_id}:user/cicd-pipeline-user\"}, \"Action\": \"sts:AssumeRole\"}"
+              echo "::warning::{\"Effect\": \"Allow\", \"Principal\": {\"AWS\": \"arn:aws:iam::\${account_id}:role/github-actions-deploy-\${environment}\"}, \"Action\": \"sts:AssumeRole\"}"
               echo "::warning::See the README for full implementation details with Terraform."
               exit 1
             fi
@@ -316,8 +302,8 @@ jobs:
             AWS_CRED_ARGS="-e AWS_ACCESS_KEY_ID=$CONTAINER_AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$CONTAINER_AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN=$CONTAINER_AWS_SESSION_TOKEN -e AWS_REGION=${{ env.AWS_REGION }}"
             echo "Successfully assumed test execution role"
           elif [ "${{ inputs.test_inject_aws_credentials }}" = "true" ]; then
-            AWS_CRED_ARGS="-e AWS_ACCESS_KEY_ID=${{ env.AWS_ACCESS_KEY_ID }} -e AWS_SECRET_ACCESS_KEY=${{ env.AWS_SECRET_ACCESS_KEY }} -e AWS_REGION=${{ env.AWS_REGION }}"
-            echo "Using admin credentials for testing"
+            AWS_CRED_ARGS="-e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN -e AWS_REGION=${{ env.AWS_REGION }}"
+            echo "Using OIDC credentials for testing"
           else
             AWS_CRED_ARGS=""
             echo "Not injecting AWS credentials into the test container"
@@ -434,8 +420,6 @@ jobs:
     timeout-minutes: ${{ inputs.job_timeout_minutes }}
     env:
       AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_dev }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_dev }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_dev }}
       AWS_ENV: dev
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -451,10 +435,9 @@ jobs:
           terraform_version: 1.0.0  # Specify your desired Terraform version here
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
@@ -492,8 +475,6 @@ jobs:
     if: inputs.ref == 'refs/heads/main' || inputs.ref == 'refs/heads/master'
     env:
       AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_prod }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_prod }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_prod }}
       AWS_ENV: prod
     steps:
       - name: Checkout code
@@ -508,10 +489,9 @@ jobs:
           terraform_version: 1.0.0  # Specify your desired Terraform version here
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Ensure ECR repo and IAM roles have been created
@@ -611,8 +591,6 @@ jobs:
     timeout-minutes: ${{ inputs.job_timeout_minutes }}
     env:
       AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_prod }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_prod }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_prod }}
       AWS_ENV: prod
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -628,10 +606,9 @@ jobs:
           terraform_version: 1.0.0  # Specify your desired Terraform version here
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR

@@ -53,11 +53,10 @@ jobs:
       job_timeout_minutes: 60
     secrets:
       aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
-      aws_access_key_id_dev: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
-      aws_secret_access_key_dev: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
       aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
-      aws_access_key_id_prod: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
-      aws_secret_access_key_prod: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+    permissions:
+      id-token: write  # Required for OIDC authentication
+      contents: read
 ```
 
 In this example, we've added the following optional parameters:
@@ -76,12 +75,12 @@ In this example, we've added the following optional parameters:
 - `disable_docker_cache`: Set to `true` to force Docker to build the image without using any cached layers. This is useful when you want to ensure a completely fresh build, such as when dependencies might have been updated without version changes. Defaults to `false`.
 - `job_timeout_minutes`: Timeout in minutes for each job (build-and-push-dev, deploy-dev, build-and-push-prod, deploy-prod). Defaults to `60`. Increase this for services with long-running test suites.
 
-Note: When using `test_execution_role_name`, the role must have a trust policy allowing the CI/CD pipeline user to assume it:
+Note: When using `test_execution_role_name`, the role must have a trust policy allowing the GitHub Actions OIDC role to assume it:
 ```json
 {
     "Effect": "Allow",
     "Principal": {
-        "AWS": "arn:aws:iam::${account_id}:user/cicd-pipeline-user"
+        "AWS": "arn:aws:iam::${account_id}:role/github-actions-deploy-${environment}"
     },
     "Action": "sts:AssumeRole"
 }
@@ -130,11 +129,10 @@ jobs:
       tf_backend_config_key: "api"
     secrets:
       aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
-      aws_access_key_id_dev: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
-      aws_secret_access_key_dev: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
       aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
-      aws_access_key_id_prod: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
-      aws_secret_access_key_prod: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+    permissions:
+      id-token: write  # Required for OIDC authentication
+      contents: read
 ```
 
 ### Example Usage - Terraform Infrastructure
@@ -180,11 +178,10 @@ jobs:
       auto_apply_dev: true
     secrets:
       aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
-      aws_access_key_id_dev: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
-      aws_secret_access_key_dev: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
       aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
-      aws_access_key_id_prod: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
-      aws_secret_access_key_prod: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+    permissions:
+      id-token: write  # Required for OIDC authentication
+      contents: read
 ```
 
 **Key features of this workflow:**
@@ -315,26 +312,60 @@ resource "aws_ecs_task_definition" "api" {
 ```
 
 ### 5. Required Secrets
-Your organization must have specific secrets configured for each environment. These secrets are necessary for the workflow to access AWS credentials and should be set up at the organization level. The required secrets are:
+Your organization must have AWS Account ID secrets configured for each environment. These secrets should be set up at the organization level:
 
-- **AWS_ACCOUNT_ID_DEV**, **AWS_ACCESS_KEY_ID_DEV**, **AWS_SECRET_ACCESS_KEY_DEV** (for the `dev` environment)
-- **AWS_ACCOUNT_ID_PROD**, **AWS_ACCESS_KEY_ID_PROD**, **AWS_SECRET_ACCESS_KEY_PROD** (for the `prod` environment)
+- **AWS_ACCOUNT_ID_DEV** (for the `dev` environment)
+- **AWS_ACCOUNT_ID_PROD** (for the `prod` environment)
 
-These secrets must be available for the workflow to properly authenticate and deploy infrastructure to the specified AWS environments.
+AWS authentication is handled via OIDC (OpenID Connect), which means no long-lived AWS access keys need to be stored as secrets. The workflows use the `github-actions-deploy-dev` and `github-actions-deploy-prod` IAM roles, which are assumed via OIDC.
+
+### 6. OIDC Authentication Setup
+These workflows use AWS OIDC for authentication. Before using the workflows, ensure the OIDC infrastructure is deployed in your AWS accounts. See `commercesong/infrastructure/github-oidc/README.md` for setup instructions.
+
+Calling workflows must include the following permissions block:
+```yaml
+permissions:
+  id-token: write  # Required for OIDC authentication
+  contents: read
+```
 
 ## Initial Setup for Reusable Workflows
 
 Before using the reusable workflows in this repository, you need to perform some initial manual setup steps to ensure everything is correctly configured:
 
+### GitHub Configuration
+
 * Organization-Level Setup: In your organization settings, go to Actions > General and select Allow all actions and reusable workflows to enable sharing across the organization.
 
-* Repository-Level Setup: In this repository's settings, under Actions > General, scroll to the Access section. Change Control how this repository is used by GitHub Actions workflows from Not accessible to Accessible from repositories in the commercesong organization, then click Save.
+* Repository-Level Setup: In this repository's settings, under Actions > General, scroll to the Access section. Change "Control how this repository is used by GitHub Actions workflows" to "Accessible from repositories in other organizations" and add the organizations that should have access.
+
+### Cross-Organization Access
+
+These workflows are designed to be shared across multiple GitHub organizations. The following organizations are configured to use them:
+- commercesong
+- enterprisevibecoding
+- elevatorfunrooms
+- forgotpw
+
+This list must stay in sync with the `github_orgs` trust list in
+[`commercesong/infrastructure/terraform-modules/github-oidc/variables.tf`](https://github.com/commercesong/infrastructure/blob/main/terraform-modules/github-oidc/variables.tf).
+GitHub-side access (this repo's "Accessible from" setting) and AWS-side trust
+(the OIDC role's trust policy) are independent — both must include a new org
+before its workflows can authenticate to AWS.
+
+### AWS OIDC Setup
+
+Before the workflows can authenticate to AWS, you must deploy the OIDC infrastructure:
+
+1. Navigate to `commercesong/infrastructure/github-oidc`
+2. Follow the instructions in the README to deploy to both dev and prod AWS accounts
+3. This creates the `github-actions-deploy-dev` and `github-actions-deploy-prod` IAM roles
 
 These steps are only required as part of the initial configuration and must be completed to allow other repositories in the organization to reference and use these reusable workflows.
 
 ## IAM Role Configuration for Testing
 
-When using `test_execution_role_name`, you need to configure your Lambda or ECS execution role in Terraform to include the CI/CD pipeline user in its trust policy. Here's how:
+When using `test_execution_role_name`, you need to configure your Lambda or ECS execution role in Terraform to include the GitHub Actions OIDC role in its trust policy. Here's how:
 
 ### For Lambda Functions:
 ```hcl
@@ -353,10 +384,10 @@ resource "aws_iam_role" "lambda_exec_role" {
         Action = "sts:AssumeRole"
       },
       {
-        # Allow CI/CD pipeline to assume this role for testing
+        # Allow GitHub Actions OIDC role to assume this role for testing
         Effect = "Allow"
         Principal = {
-          AWS = "arn:aws:iam::${var.aws_account_id}:user/cicd-pipeline-user"
+          AWS = "arn:aws:iam::${var.aws_account_id}:role/github-actions-deploy-${var.environment}"
         }
         Action = "sts:AssumeRole"
       }
@@ -382,10 +413,10 @@ resource "aws_iam_role" "ecs_task_role" {
         Action = "sts:AssumeRole"
       },
       {
-        # Allow CI/CD pipeline to assume this role for testing
+        # Allow GitHub Actions OIDC role to assume this role for testing
         Effect = "Allow"
         Principal = {
-          AWS = "arn:aws:iam::${var.aws_account_id}:user/cicd-pipeline-user"
+          AWS = "arn:aws:iam::${var.aws_account_id}:role/github-actions-deploy-${var.environment}"
         }
         Action = "sts:AssumeRole"
       }

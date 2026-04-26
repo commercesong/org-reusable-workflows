@@ -28,21 +28,13 @@ on:
       aws_account_id_dev:
         description: 'AWS Account ID for Dev'
         required: true
-      aws_access_key_id_dev:
-        description: 'AWS Access Key ID for Dev'
-        required: true
-      aws_secret_access_key_dev:
-        description: 'AWS Secret Access Key for Dev'
-        required: true
       aws_account_id_prod:
         description: 'AWS Account ID for Prod'
         required: true
-      aws_access_key_id_prod:
-        description: 'AWS Access Key ID for Prod'
-        required: true
-      aws_secret_access_key_prod:
-        description: 'AWS Secret Access Key for Prod'
-        required: true
+
+permissions:
+  contents: read
+  id-token: write  # Required for OIDC authentication
 
 jobs:
   deploy:
@@ -53,17 +45,13 @@ jobs:
       IMAGE_NAME: ${{ inputs.image_name }}
       TF_BACKEND_CONFIG_KEY: ${{ inputs.tf_backend_config_key }}
     steps:
-      - name: Set AWS environment variables based on AWS_ENV
+      - name: Set AWS Account ID based on AWS_ENV
         run: |
-          echo "Setting AWS credentials for $AWS_ENV environment"
+          echo "Setting AWS Account ID for $AWS_ENV environment"
           if [ "$AWS_ENV" == "dev" ]; then
             echo "AWS_ACCOUNT_ID=${{ secrets.aws_account_id_dev }}" >> $GITHUB_ENV
-            echo "AWS_ACCESS_KEY_ID=${{ secrets.aws_access_key_id_dev }}" >> $GITHUB_ENV
-            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.aws_secret_access_key_dev }}" >> $GITHUB_ENV
           elif [ "$AWS_ENV" == "prod" ]; then
             echo "AWS_ACCOUNT_ID=${{ secrets.aws_account_id_prod }}" >> $GITHUB_ENV
-            echo "AWS_ACCESS_KEY_ID=${{ secrets.aws_access_key_id_prod }}" >> $GITHUB_ENV
-            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.aws_secret_access_key_prod }}" >> $GITHUB_ENV
           else
             echo "ERROR: Unknown AWS_ENV $AWS_ENV"
             exit 1
@@ -81,10 +69,9 @@ jobs:
           terraform_version: 1.8.3
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR

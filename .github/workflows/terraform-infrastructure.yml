@@ -54,20 +54,8 @@ on:
       aws_account_id_dev:
         description: 'AWS Account ID for Dev'
         required: true
-      aws_access_key_id_dev:
-        description: 'AWS Access Key ID for Dev'
-        required: true
-      aws_secret_access_key_dev:
-        description: 'AWS Secret Access Key for Dev'
-        required: true
       aws_account_id_prod:
         description: 'AWS Account ID for Prod'
-        required: true
-      aws_access_key_id_prod:
-        description: 'AWS Access Key ID for Prod'
-        required: true
-      aws_secret_access_key_prod:
-        description: 'AWS Secret Access Key for Prod'
         required: true
 
 env:
@@ -82,6 +70,7 @@ permissions:
   contents: read
   pull-requests: write  # For plan comments
   issues: write        # For plan comments
+  id-token: write      # Required for OIDC authentication
 
 jobs:
   terraform-plan-dev:
@@ -90,8 +79,6 @@ jobs:
     if: github.event_name == 'pull_request' || inputs.ref == 'refs/heads/develop' || startsWith(inputs.ref, 'refs/heads/feature/')
     env:
       AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_dev }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_dev }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_dev }}
       AWS_ENV: dev
     outputs:
       plan_output: ${{ steps.plan.outputs.stdout }}
@@ -110,10 +97,9 @@ jobs:
           terraform_wrapper: false
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
@@ -173,8 +159,6 @@ jobs:
       needs.terraform-plan-dev.outputs.plan_exitcode == '0'
     env:
       AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_dev }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_dev }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_dev }}
       AWS_ENV: dev
     steps:
       - name: Checkout code
@@ -190,10 +174,9 @@ jobs:
           terraform_wrapper: false
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
@@ -216,8 +199,6 @@ jobs:
     if: inputs.ref == 'refs/heads/main' || inputs.ref == 'refs/heads/master'
     env:
       AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_prod }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_prod }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_prod }}
       AWS_ENV: prod
     outputs:
       plan_output: ${{ steps.plan.outputs.stdout }}
@@ -236,10 +217,9 @@ jobs:
           terraform_wrapper: false
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
@@ -273,8 +253,6 @@ jobs:
     # To add manual approval gates, uncomment: environment: production
     env:
       AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_prod }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.aws_access_key_id_prod }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.aws_secret_access_key_prod }}
       AWS_ENV: prod
     steps:
       - name: Checkout code
@@ -290,10 +268,9 @@ jobs:
           terraform_wrapper: false
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
