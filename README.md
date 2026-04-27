@@ -4,15 +4,30 @@ This repository contains a collection of reusable GitHub Actions workflows desig
 
 ## Quick Start: Wire Up a New Microservice Repo
 
-If your new repo lives in one of the 4 trusted orgs (commercesong, enterprisevibecoding, elevatorfunrooms, forgotpw), the GitHub-side setup is **already done for you** — org secrets and OIDC trust both cover any repo in those orgs automatically. The only per-repo work is:
+If your new repo lives in one of the trusted orgs (currently commercesong, enterprisevibecoding, elevatorfunrooms, forgotpw — more expected to be added over time), the OIDC trust and the calling pattern are already set up. The per-repo work:
 
 1. **Add a `terraform/` directory** following the [standard module structure](https://github.com/commercesong/infrastructure/blob/main/README.md#module-structure): `provider.tf` (empty `backend "s3" {}`), `main.tf`, `variables.tf`, `outputs.tf`, `env-dev.tfvars`, `env-prod.tfvars`, and a `TF_KEY` file containing a unique state key (e.g., `my-service`).
 
-2. **Add a workflow** at `.github/workflows/<name>.yml` calling one of the reusable workflows (see examples below). For pure-infrastructure modules use `terraform-infrastructure.yml`; for containerized services use `cicd-terraform-container.yml`.
+2. **Add a workflow** at `.github/workflows/<name>.yml` calling one of the reusable workflows (see examples below). For pure-infrastructure modules use `terraform-infrastructure.yml`; for containerized services use `cicd-terraform-container.yml`. **Use the full permissions block from the example — see "GitHub Free gotchas" below.**
 
-3. **Push.** Workflow triggers on pushes to `main`/`develop` and PRs (per the trigger patterns in the reusable workflows).
+3. **Set repo-level secrets** `AWS_ACCOUNT_ID_DEV` and `AWS_ACCOUNT_ID_PROD` if the repo is **private**. If public, the org-level secrets cover it. (See "GitHub Free gotchas" for why.) These secrets hold specific 12-digit AWS account IDs — one for the CommerceSong dev account, one for the prod account. The actual values are documented in the private [`commercesong/infrastructure` README](https://github.com/commercesong/infrastructure/blob/main/README.md#github-actions-org-secrets) (this link will 404 if you're not a CommerceSong org member). Look them up there, then:
 
-That's it — no GitHub UI configuration, no secret-setting, no IAM changes. If your new repo is in a **brand-new org** (not one of the 4 above), see the "Adding a new GitHub org" sections in [`commercesong/infrastructure/README.md`](https://github.com/commercesong/infrastructure/blob/main/README.md) and [`infrastructure/github-oidc/README.md`](https://github.com/commercesong/infrastructure/blob/main/github-oidc/README.md) — both must be updated together.
+   ```bash
+   gh secret set AWS_ACCOUNT_ID_DEV  --repo <org>/<repo> --body <DEV_ACCOUNT_ID>
+   gh secret set AWS_ACCOUNT_ID_PROD --repo <org>/<repo> --body <PROD_ACCOUNT_ID>
+   ```
+
+4. **Push.** Workflow triggers on pushes to `main`/`develop` and PRs (per the trigger patterns in the reusable workflows).
+
+If your new repo is in a **brand-new org** (not one of the 4 above), see the "Adding a new GitHub org" sections in [`commercesong/infrastructure/README.md`](https://github.com/commercesong/infrastructure/blob/main/README.md) and [`infrastructure/github-oidc/README.md`](https://github.com/commercesong/infrastructure/blob/main/github-oidc/README.md) — both must be updated together.
+
+### GitHub Free gotchas (verified the hard way)
+
+Two non-obvious things that will silently break a fresh repo unless handled:
+
+1. **Org secrets don't reach private repos on Free plan.** Per [GitHub docs](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions#about-secrets): "Organizations on GitHub Free plans can use organization secrets in public repositories only." The 4 trusted orgs all have `AWS_ACCOUNT_ID_DEV/PROD` pre-set at the org level with `ALL` visibility, but those values resolve to **empty strings** when referenced from a private repo's workflow. Symptom: `Set up AWS credentials` step fails because the constructed role ARN ends up like `arn:aws:iam:::role/github-actions-deploy-dev`. Fix: re-set as **repo-level** secrets (step 3 above). Public repos work fine with the org-level secrets.
+
+2. **Org default `GITHUB_TOKEN` permissions are read-only.** All 4 trusted orgs have `default_workflow_permissions: read`. The reusable workflows declare top-level permissions blocks listing what they need. The calling workflow MUST grant **at least the same set** — otherwise the run fails at startup with `startup_failure` and no useful log. The examples below include the full required block for each workflow type. Don't trim them.
 
 ## Workflows
 
@@ -67,8 +82,9 @@ jobs:
       aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
       aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
     permissions:
-      id-token: write  # Required for OIDC authentication
-      contents: read
+      id-token: write   # Required for OIDC token exchange with AWS
+      contents: read    # Required to checkout the repo
+      packages: read    # Required to pull private GitHub Packages during Docker build
 ```
 
 In this example, we've added the following optional parameters:
@@ -143,8 +159,8 @@ jobs:
       aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
       aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
     permissions:
-      id-token: write  # Required for OIDC authentication
-      contents: read
+      id-token: write   # Required for OIDC token exchange with AWS
+      contents: read    # Required to checkout the repo
 ```
 
 ### Example Usage - Terraform Infrastructure
@@ -192,8 +208,10 @@ jobs:
       aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
       aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
     permissions:
-      id-token: write  # Required for OIDC authentication
-      contents: read
+      id-token: write       # Required for OIDC token exchange with AWS
+      contents: read        # Required to checkout the repo
+      pull-requests: write  # Required to post Terraform plan comments on PRs
+      issues: write         # Required by the PR comment API used by github-script
 ```
 
 **Key features of this workflow:**
@@ -329,16 +347,16 @@ The workflows expect these two GitHub Actions secrets to resolve at runtime:
 - **AWS_ACCOUNT_ID_DEV** (for the `dev` environment)
 - **AWS_ACCOUNT_ID_PROD** (for the `prod` environment)
 
-**Status: already set at the org level on all 4 trusted orgs** (commercesong, enterprisevibecoding, elevatorfunrooms, forgotpw) with `ALL` visibility, so any repo in those orgs inherits them automatically — **no per-repo secret setup needed**.
+These are pre-set at the **org level** on all currently-trusted orgs (commercesong, enterprisevibecoding, elevatorfunrooms, forgotpw — more expected over time) with `ALL` visibility. **However**, on GitHub Free plans, org-level secrets only resolve in **public** repos — they appear as empty strings in private-repo workflows. So for any **private** repo, you must additionally set them at the **repo level**:
 
-To verify on any of those orgs:
 ```bash
-gh secret list --org <org-name>
+gh secret set AWS_ACCOUNT_ID_DEV  --repo <org>/<repo> --body <DEV_ACCOUNT_ID>
+gh secret set AWS_ACCOUNT_ID_PROD --repo <org>/<repo> --body <PROD_ACCOUNT_ID>
 ```
-You should see both secrets with timestamp and `ALL` visibility.
 
-The values, where they live, and how to set them on a brand-new org are
-documented in [`commercesong/infrastructure/README.md`](https://github.com/commercesong/infrastructure/blob/main/README.md#github-actions-org-secrets).
+The actual account ID values (one for the CommerceSong dev account, one for prod), plus how to set them on a brand-new org, are documented in the private [`commercesong/infrastructure/README.md`](https://github.com/commercesong/infrastructure/blob/main/README.md#github-actions-org-secrets) (link 404s for non-members).
+
+Verify with `gh secret list --repo <org>/<repo>`.
 
 AWS authentication itself is OIDC — no long-lived AWS access keys are stored anywhere. The workflows use the `github-actions-deploy-dev` and `github-actions-deploy-prod` IAM roles, assumed via the OIDC provider configured in [`commercesong/infrastructure/github-oidc/`](https://github.com/commercesong/infrastructure/tree/main/github-oidc).
 
@@ -366,14 +384,15 @@ permissions:
 
 ### Cross-Organization Access (AWS / OIDC Trust List)
 
-The following GitHub organizations are trusted by the AWS OIDC IAM role and can therefore deploy via these workflows:
+The following GitHub organizations are **currently** trusted by the AWS OIDC IAM role and can therefore deploy via these workflows:
 - commercesong
 - enterprisevibecoding
 - elevatorfunrooms
 - forgotpw
 
-This list is the canonical source of truth for the AWS-side trust and must stay in sync with the `github_orgs` default in
-[`commercesong/infrastructure/terraform-modules/github-oidc/variables.tf`](https://github.com/commercesong/infrastructure/blob/main/terraform-modules/github-oidc/variables.tf).
+This is the current snapshot — the expectation is that more orgs will be added over time as new ventures spin up under the same shared CommerceSong AWS infrastructure. The canonical source of truth for the AWS-side trust is the `github_orgs` default in
+[`commercesong/infrastructure/terraform-modules/github-oidc/variables.tf`](https://github.com/commercesong/infrastructure/blob/main/terraform-modules/github-oidc/variables.tf) (link 404s for non-members) — when adding a new org, update that variable and re-apply the github-oidc terraform.
+
 While this repo is public, no GitHub-side access list is needed — the OIDC trust policy is the only gate. If the repo ever goes private again, the GitHub-side "Accessible from" setting would also need to include each org (see GitHub Configuration above).
 
 ### AWS OIDC Setup
