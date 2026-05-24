@@ -1,0 +1,152 @@
+name: Static Site Deploy Workflow
+
+# Reusable workflow for deploying static-site content to an S3 bucket
+# (with optional CloudFront invalidation in prod). Intended to be called
+# AFTER terraform-infrastructure.yml has provisioned the bucket and (in prod)
+# the CloudFront distribution.
+#
+# Typical caller pattern:
+#   1. terraform-infrastructure.yml — provisions S3 + CloudFront + ACM + Route53
+#   2. static-site-deploy.yml — syncs site content to the bucket, invalidates CF
+#
+# Trigger model (matches terraform-infrastructure.yml):
+#   - push to develop  → deploy to dev bucket
+#   - push to main     → deploy to prod bucket + CloudFront invalidation
+#   - pull_request     → no-op (TF plan-on-PR already covers infra changes)
+
+on:
+  workflow_call:
+    inputs:
+      source_path:
+        description: 'Path within the repo containing the static site to sync (e.g. "site")'
+        required: true
+        type: string
+      bucket_name_dev:
+        description: 'S3 bucket name for the dev environment'
+        required: true
+        type: string
+      bucket_name_prod:
+        description: 'S3 bucket name for the prod environment'
+        required: true
+        type: string
+      cloudfront_distribution_id_prod:
+        description: 'CloudFront distribution ID for prod. If empty, no invalidation is performed.'
+        required: false
+        type: string
+        default: ''
+      aws_region:
+        description: 'AWS Region'
+        required: false
+        type: string
+        default: 'us-east-1'
+      commit_hash:
+        description: 'Commit hash to use for deployment'
+        required: true
+        type: string
+      ref:
+        description: 'Branch reference from the calling workflow'
+        required: true
+        type: string
+      delete_removed:
+        description: 'Pass --delete to aws s3 sync so files removed from the source are removed from the bucket'
+        required: false
+        type: boolean
+        default: true
+      invalidation_paths:
+        description: 'CloudFront invalidation path patterns (space-separated, e.g. "/*" or "/index.html /styles.css")'
+        required: false
+        type: string
+        default: '/*'
+    secrets:
+      aws_account_id_dev:
+        description: 'AWS Account ID for Dev'
+        required: true
+      aws_account_id_prod:
+        description: 'AWS Account ID for Prod'
+        required: true
+
+env:
+  AWS_REGION: ${{ inputs.aws_region }}
+  COMMIT_HASH: ${{ inputs.commit_hash }}
+  SOURCE_PATH: ${{ inputs.source_path }}
+
+# Set GITHUB_TOKEN permissions
+permissions:
+  contents: read
+  id-token: write   # Required for OIDC authentication
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: inputs.ref == 'refs/heads/develop'
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_dev }}
+      AWS_ENV: dev
+      BUCKET_NAME: ${{ inputs.bucket_name_dev }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync site to S3 (dev)
+        run: |
+          DELETE_FLAG=""
+          if [ "${{ inputs.delete_removed }}" = "true" ]; then
+            DELETE_FLAG="--delete"
+          fi
+          aws s3 sync "${SOURCE_PATH}/" "s3://${BUCKET_NAME}/" $DELETE_FLAG
+
+  deploy-prod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: inputs.ref == 'refs/heads/main' || inputs.ref == 'refs/heads/master'
+    # Auto-deploys to production on main branch merges (following org standard)
+    # To add manual approval gates, uncomment: environment: production
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_prod }}
+      AWS_ENV: prod
+      BUCKET_NAME: ${{ inputs.bucket_name_prod }}
+      DISTRIBUTION_ID: ${{ inputs.cloudfront_distribution_id_prod }}
+      INVALIDATION_PATHS: ${{ inputs.invalidation_paths }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync site to S3 (prod)
+        run: |
+          DELETE_FLAG=""
+          if [ "${{ inputs.delete_removed }}" = "true" ]; then
+            DELETE_FLAG="--delete"
+          fi
+          aws s3 sync "${SOURCE_PATH}/" "s3://${BUCKET_NAME}/" $DELETE_FLAG
+
+      - name: Invalidate CloudFront
+        if: env.DISTRIBUTION_ID != ''
+        run: |
+          # CloudFront invalidation paths use patterns like "/*" that look
+          # like shell globs but must be passed through unexpanded. set -f
+          # disables shell filename expansion for this command; word splitting
+          # is preserved so multiple space-separated paths still work.
+          set -f
+          aws cloudfront create-invalidation \
+            --distribution-id "${DISTRIBUTION_ID}" \
+            --paths ${INVALIDATION_PATHS}
+          set +f

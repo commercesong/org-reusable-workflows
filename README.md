@@ -4,13 +4,13 @@ This repository contains a collection of reusable GitHub Actions workflows desig
 
 ## Quick Start: Wire Up a New Microservice Repo
 
-If your new repo lives in one of the trusted orgs (currently commercesong, enterprisevibecoding, elevatorfunrooms, forgotpw — more expected to be added over time), the OIDC trust and the calling pattern are already set up. The per-repo work:
+If your new repo lives under one of the trusted GitHub owners — organizations *or* personal accounts (currently `commercesong`, `enterprisevibecoding`, `elevatorfunrooms`, `forgotpw`, `dwkerwin` — more expected to be added over time), the OIDC trust and the calling pattern are already set up. Personal-account repos work the same as org repos here; GitHub's OIDC `sub` claim treats them identically. The per-repo work:
 
 1. **Add a `terraform/` directory** following the [standard module structure](https://github.com/commercesong/infrastructure/blob/main/README.md#module-structure): `provider.tf` (empty `backend "s3" {}`), `main.tf`, `variables.tf`, `outputs.tf`, `env-dev.tfvars`, `env-prod.tfvars`, and a `TF_KEY` file containing a unique state key (e.g., `my-service`).
 
 2. **Add a workflow** at `.github/workflows/<name>.yml` calling one of the reusable workflows (see examples below). For pure-infrastructure modules use `terraform-infrastructure.yml`; for containerized services use `cicd-terraform-container.yml`. **Use the full permissions block from the example — see "GitHub Free gotchas" below.**
 
-3. **Set repo-level secrets** `AWS_ACCOUNT_ID_DEV` and `AWS_ACCOUNT_ID_PROD` if the repo is **private**. If public, the org-level secrets cover it. (See "GitHub Free gotchas" for why.) These secrets hold specific 12-digit AWS account IDs — one for the CommerceSong dev account, one for the prod account. The actual values are documented in the private [`commercesong/infrastructure` README](https://github.com/commercesong/infrastructure/blob/main/README.md#github-actions-org-secrets) (this link will 404 if you're not a CommerceSong org member). Look them up there, then:
+3. **Set repo-level secrets** `AWS_ACCOUNT_ID_DEV` and `AWS_ACCOUNT_ID_PROD` if the repo is **private**, OR if it lives under a **personal account** (personal accounts don't expose org-level secrets to repos, regardless of public/private). If it's a **public repo under an org**, the org-level secrets cover it and you can skip this step. (See "GitHub Free gotchas" for why.) These secrets hold specific 12-digit AWS account IDs — one for the CommerceSong dev account, one for the prod account. The actual values are documented in the private [`commercesong/infrastructure` README](https://github.com/commercesong/infrastructure/blob/main/README.md#github-actions-org-secrets) (this link will 404 if you're not a CommerceSong org member). Look them up there, then:
 
    ```bash
    gh secret set AWS_ACCOUNT_ID_DEV  --repo <org>/<repo> --body <DEV_ACCOUNT_ID>
@@ -19,15 +19,15 @@ If your new repo lives in one of the trusted orgs (currently commercesong, enter
 
 4. **Push.** Workflow triggers on pushes to `main`/`develop` and PRs (per the trigger patterns in the reusable workflows).
 
-If your new repo is in a **brand-new org** (not one of the 4 above), see the "Adding a new GitHub org" sections in [`commercesong/infrastructure/README.md`](https://github.com/commercesong/infrastructure/blob/main/README.md) and [`infrastructure/github-oidc/README.md`](https://github.com/commercesong/infrastructure/blob/main/github-oidc/README.md) — both must be updated together.
+If your new repo is under a **brand-new GitHub owner** (org or personal account not in the list above), see the "Adding a new GitHub Owner" sections in [`commercesong/infrastructure/README.md`](https://github.com/commercesong/infrastructure/blob/main/README.md) and [`infrastructure/github-oidc/README.md`](https://github.com/commercesong/infrastructure/blob/main/github-oidc/README.md) — both must be updated together.
 
 ### GitHub Free gotchas (verified the hard way)
 
 Two non-obvious things that will silently break a fresh repo unless handled:
 
-1. **Org secrets don't reach private repos on Free plan.** Per [GitHub docs](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions#about-secrets): "Organizations on GitHub Free plans can use organization secrets in public repositories only." The 4 trusted orgs all have `AWS_ACCOUNT_ID_DEV/PROD` pre-set at the org level with `ALL` visibility, but those values resolve to **empty strings** when referenced from a private repo's workflow. Symptom: `Set up AWS credentials` step fails because the constructed role ARN ends up like `arn:aws:iam:::role/github-actions-deploy-dev`. Fix: re-set as **repo-level** secrets (step 3 above). Public repos work fine with the org-level secrets.
+1. **Org secrets don't reach private repos on Free plan, and personal accounts have no org secrets at all.** Per [GitHub docs](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions#about-secrets): "Organizations on GitHub Free plans can use organization secrets in public repositories only." The trusted orgs (`commercesong`, `enterprisevibecoding`, `elevatorfunrooms`, `forgotpw`) all have `AWS_ACCOUNT_ID_DEV/PROD` pre-set at the org level with `ALL` visibility, but those values resolve to **empty strings** when referenced from a private repo's workflow. Personal-account repos (e.g., `dwkerwin/*`) face the same issue from the other direction — there's no org level to set secrets at. Symptom either way: `Set up AWS credentials` step fails because the constructed role ARN ends up like `arn:aws:iam:::role/github-actions-deploy-dev`. Fix: set as **repo-level** secrets (step 3 above). Public org repos work fine with the org-level secrets.
 
-2. **Org default `GITHUB_TOKEN` permissions are read-only.** All 4 trusted orgs have `default_workflow_permissions: read`. The reusable workflows declare top-level permissions blocks listing what they need. The calling workflow MUST grant **at least the same set** — otherwise the run fails at startup with `startup_failure` and no useful log. The examples below include the full required block for each workflow type. Don't trim them.
+2. **Org default `GITHUB_TOKEN` permissions are read-only.** All trusted orgs have `default_workflow_permissions: read` (and personal-account default is the same). The reusable workflows declare top-level permissions blocks listing what they need. The calling workflow MUST grant **at least the same set** — otherwise the run fails at startup with `startup_failure` and no useful log. The examples below include the full required block for each workflow type. Don't trim them.
 
 ## Workflows
 
@@ -39,6 +39,9 @@ This workflow facilitates manual Terraform deployments with added checks and bal
 
 ### 3. Terraform Infrastructure Workflow
 This workflow is designed for **pure Terraform infrastructure deployments** (no Docker containers involved). It's perfect for infrastructure modules like backup services, networking, or security configurations. The workflow provides plan-on-PR functionality, auto-deploys to dev, and auto-deploys to production on main branch merges (following org standard).
+
+### 4. Static Site Deploy Workflow
+This workflow syncs a directory of static-site content to an S3 bucket and optionally invalidates a CloudFront distribution. It's meant to run **after** `terraform-infrastructure.yml` has provisioned the bucket (and, in prod, the CloudFront distribution). Typical pattern in a static-site repo: one caller workflow that calls `terraform-infrastructure.yml` for the infra, then calls `static-site-deploy.yml` for the content. Pushes to `develop` deploy to the dev bucket; pushes to `main` deploy to the prod bucket and invalidate CloudFront.
 
 ## Example Usage
 
@@ -246,6 +249,90 @@ The workflow supports two approaches for tfvars files:
 3. **Main Branch**: Auto-deploys to production environment after merge
 4. **Manual Dispatch**: Deploy to any environment on-demand via GitHub UI
 
+### Example Usage - Static Site Deploy
+
+This workflow is almost always called **alongside** `terraform-infrastructure.yml` from the same caller workflow — the TF job provisions the S3 bucket (and CloudFront in prod), then the static-site-deploy job syncs content into it.
+
+`.github/workflows/deploy.yml`:
+```yaml
+name: Deploy Static Site
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  # 1. Provision/update AWS infra (bucket, CloudFront, ACM, Route53)
+  infrastructure:
+    uses: commercesong/org-reusable-workflows/.github/workflows/terraform-infrastructure.yml@main
+    with:
+      tf_backend_config_key: "my-site"
+      aws_region: "us-east-1"
+      commit_hash: ${{ github.sha }}
+      ref: ${{ github.ref }}
+      terraform_path: "terraform"
+    secrets:
+      aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
+      aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+      issues: write
+
+  # 2. Sync site content to the bucket the TF job manages.
+  #    Runs only on pushes to develop / main (not on PRs).
+  content:
+    needs: infrastructure
+    if: github.event_name == 'push'
+    uses: commercesong/org-reusable-workflows/.github/workflows/static-site-deploy.yml@main
+    with:
+      source_path: "site"
+      bucket_name_dev: "my-site-dev"
+      bucket_name_prod: "my-site-prod"
+      cloudfront_distribution_id_prod: "E1ABCDEFGHIJK"
+      commit_hash: ${{ github.sha }}
+      ref: ${{ github.ref }}
+    secrets:
+      aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
+      aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
+    permissions:
+      id-token: write
+      contents: read
+```
+
+**Key features:**
+
+- **Two-phase deploy**: Infra (TF) runs first, then content sync. If TF fails, content sync is skipped.
+- **Dev / prod symmetry**: Same workflow handles both. `develop` → dev bucket, `main` → prod bucket + CloudFront invalidation.
+- **CloudFront invalidation is opt-in**: Omit `cloudfront_distribution_id_prod` (or pass `''`) to skip invalidation — useful when prod doesn't have a CloudFront distribution yet.
+- **--delete by default**: `aws s3 sync` runs with `--delete` so files removed from the source are removed from the bucket. Set `delete_removed: false` to disable.
+- **No deploy on PRs**: TF plan still runs on PRs (via the infrastructure job), but the content-sync phase is gated to push events only.
+
+**Parameters:**
+
+- `source_path` (required): Directory in the repo containing the static site (e.g. `"site"`, `"public"`, `"dist"`).
+- `bucket_name_dev` / `bucket_name_prod` (required): S3 bucket names. Typically deterministic from your Terraform config (e.g. `"my-site-dev"` / `"my-site-prod"`).
+- `cloudfront_distribution_id_prod` (optional, default `''`): If set, an invalidation is created on the prod CloudFront distribution after the sync. Get this from the Terraform output after the first prod apply.
+- `invalidation_paths` (optional, default `'/*'`): Space-separated CloudFront path patterns to invalidate. Override if you want to invalidate only certain files.
+- `delete_removed` (optional, default `true`): Whether to pass `--delete` to `aws s3 sync`.
+- `aws_region` (optional, default `'us-east-1'`)
+
+**First-run gotcha:**
+
+On the very first push to `main`, the prod CloudFront distribution doesn't exist yet when the content job runs (TF creates it in the same workflow run). You have two options:
+
+1. Leave `cloudfront_distribution_id_prod: ''` for the first run, then update it after Terraform outputs the ID.
+2. Run Terraform manually once (`terraform apply -var-file=env-prod.tfvars` from the prod account), copy the distribution ID into the workflow, then push to main.
+
+After the first run the distribution ID is stable — it doesn't change on subsequent applies.
+
 ## Pre-Requisites for Repos Using these Workflows
 
 To successfully use these reusable workflows, your repository must meet the following requirements:
@@ -347,7 +434,10 @@ The workflows expect these two GitHub Actions secrets to resolve at runtime:
 - **AWS_ACCOUNT_ID_DEV** (for the `dev` environment)
 - **AWS_ACCOUNT_ID_PROD** (for the `prod` environment)
 
-These are pre-set at the **org level** on all currently-trusted orgs (commercesong, enterprisevibecoding, elevatorfunrooms, forgotpw — more expected over time) with `ALL` visibility. **However**, on GitHub Free plans, org-level secrets only resolve in **public** repos — they appear as empty strings in private-repo workflows. So for any **private** repo, you must additionally set them at the **repo level**:
+These are pre-set at the **org level** on all currently-trusted **organizations** (commercesong, enterprisevibecoding, elevatorfunrooms, forgotpw — more expected over time) with `ALL` visibility. **However**, on GitHub Free plans, org-level secrets only resolve in **public** repos — they appear as empty strings in private-repo workflows. And **personal-account** repos (currently `dwkerwin`) have no org-level secret mechanism at all. So you must additionally set them at the **repo level** for any of these cases:
+
+- Any **private** repo (org or personal)
+- Any repo under a **personal account** (e.g. `dwkerwin/*`), public or private
 
 ```bash
 gh secret set AWS_ACCOUNT_ID_DEV  --repo <org>/<repo> --body <DEV_ACCOUNT_ID>
@@ -382,18 +472,19 @@ permissions:
 
 * Repository-Level Setup: In this repository's settings, under Actions > General, scroll to the Access section. Change "Control how this repository is used by GitHub Actions workflows" to "Accessible from repositories in other organizations" and add the organizations that should have access. *(Note: this option requires GitHub Enterprise — it's not available on Free or Team plans.)*
 
-### Cross-Organization Access (AWS / OIDC Trust List)
+### Cross-Owner Access (AWS / OIDC Trust List)
 
-The following GitHub organizations are **currently** trusted by the AWS OIDC IAM role and can therefore deploy via these workflows:
-- commercesong
-- enterprisevibecoding
-- elevatorfunrooms
-- forgotpw
+The following GitHub **owners** — organizations or personal accounts — are **currently** trusted by the AWS OIDC IAM role and can therefore deploy via these workflows:
+- `commercesong`
+- `enterprisevibecoding`
+- `elevatorfunrooms`
+- `forgotpw`
+- `dwkerwin` *(personal account — for small projects that live under a maintainer's namespace rather than getting their own org)*
 
-This is the current snapshot — the expectation is that more orgs will be added over time as new ventures spin up under the same shared CommerceSong AWS infrastructure. The canonical source of truth for the AWS-side trust is the `github_orgs` default in
-[`commercesong/infrastructure/terraform-modules/github-oidc/variables.tf`](https://github.com/commercesong/infrastructure/blob/main/terraform-modules/github-oidc/variables.tf) (link 404s for non-members) — when adding a new org, update that variable and re-apply the github-oidc terraform.
+This is the current snapshot — the expectation is that more owners will be added over time as new ventures spin up under the same shared CommerceSong AWS infrastructure, and as small personal projects come online under maintainer accounts. GitHub's OIDC `sub` claim treats orgs and user accounts identically (`repo:<owner>/<repo>:ref:...`), so personal accounts work via the same trust policy. The canonical source of truth for the AWS-side trust is the `github_orgs` default in
+[`commercesong/infrastructure/terraform-modules/github-oidc/variables.tf`](https://github.com/commercesong/infrastructure/blob/main/terraform-modules/github-oidc/variables.tf) (link 404s for non-members) — when adding a new owner, update that variable and re-apply the github-oidc terraform.
 
-While this repo is public, no GitHub-side access list is needed — the OIDC trust policy is the only gate. If the repo ever goes private again, the GitHub-side "Accessible from" setting would also need to include each org (see GitHub Configuration above).
+While this repo is public, no GitHub-side access list is needed — the OIDC trust policy is the only gate. If the repo ever goes private again, the GitHub-side "Accessible from" setting would also need to include each owner (see GitHub Configuration above).
 
 ### AWS OIDC Setup
 
