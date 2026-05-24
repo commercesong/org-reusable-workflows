@@ -86,13 +86,13 @@ jobs:
       BUCKET_NAME: ${{ inputs.bucket_name_dev }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.repository }}
           ref: ${{ env.COMMIT_HASH }}
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
@@ -119,13 +119,13 @@ jobs:
       INVALIDATION_PATHS: ${{ inputs.invalidation_paths }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.repository }}
           ref: ${{ env.COMMIT_HASH }}
 
       - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
