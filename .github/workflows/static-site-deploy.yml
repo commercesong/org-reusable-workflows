@@ -12,7 +12,9 @@ name: Static Site Deploy Workflow
 # Trigger model (matches terraform-infrastructure.yml):
 #   - push to develop  → deploy to dev bucket
 #   - push to main     → deploy to prod bucket + CloudFront invalidation
-#   - pull_request     → no-op (TF plan-on-PR already covers infra changes)
+# Static-site caller workflows should normally be push-only. If a site needs
+# PR-time Terraform plans, use a separate plan-only caller workflow instead of
+# adding pull_request to the combined infra + content deploy workflow.
 
 on:
   workflow_call:

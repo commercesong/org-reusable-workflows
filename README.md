@@ -17,7 +17,7 @@ If your new repo lives under one of the trusted GitHub owners — organizations 
    gh secret set AWS_ACCOUNT_ID_PROD --repo <org>/<repo> --body <PROD_ACCOUNT_ID>
    ```
 
-4. **Push.** Workflow triggers on pushes to `main`/`develop` and PRs (per the trigger patterns in the reusable workflows).
+4. **Push.** Workflow triggers depend on the caller workflow. Static-site deploy callers should trigger on pushes to `main`/`develop` only; pure Terraform callers may also use PR triggers for plan comments.
 
 If your new repo is under a **brand-new GitHub owner** (org or personal account not in the list above), see the "Adding a new GitHub Owner" sections in [`commercesong/infrastructure/README.md`](https://github.com/commercesong/infrastructure/blob/main/README.md) and [`infrastructure/github-oidc/README.md`](https://github.com/commercesong/infrastructure/blob/main/github-oidc/README.md) — both must be updated together.
 
@@ -253,16 +253,14 @@ The workflow supports two approaches for tfvars files:
 
 This workflow is almost always called **alongside** `terraform-infrastructure.yml` from the same caller workflow — the TF job provisions the S3 bucket (and CloudFront in prod), then the static-site-deploy job syncs content into it.
 
+For static sites, use a push-only caller trigger. Do **not** add `pull_request` to the combined static-site deploy workflow: the reusable Terraform job can comment plans on PRs, but in this two-phase static-site pattern the same workflow also contains the content deploy job. We have verified in Enso Dynamics and Slopapalooza that PR-triggered static-site deploy workflows create noisy duplicate runs and failure modes. Keep the full permissions block on the infrastructure job anyway; the reusable Terraform workflow declares those permissions and GitHub will fail the run at startup if the caller trims them.
+
 `.github/workflows/deploy.yml`:
 ```yaml
 name: Deploy Static Site
 
 on:
   push:
-    branches:
-      - main
-      - develop
-  pull_request:
     branches:
       - main
       - develop
@@ -313,7 +311,7 @@ jobs:
 - **Dev / prod symmetry**: Same workflow handles both. `develop` → dev bucket, `main` → prod bucket + CloudFront invalidation.
 - **CloudFront invalidation is opt-in**: Omit `cloudfront_distribution_id_prod` (or pass `''`) to skip invalidation — useful when prod doesn't have a CloudFront distribution yet.
 - **--delete by default**: `aws s3 sync` runs with `--delete` so files removed from the source are removed from the bucket. Set `delete_removed: false` to disable.
-- **No deploy on PRs**: TF plan still runs on PRs (via the infrastructure job), but the content-sync phase is gated to push events only.
+- **No static-site workflow on PRs**: Keep this combined static-site deploy workflow push-only. If a site needs PR-time Terraform plans, use a separate plan-only caller workflow rather than adding `pull_request` to this deploy workflow.
 
 **Parameters:**
 
@@ -748,4 +746,3 @@ test_command: "npm test"
 
 **Why exact versions for private packages?**
 During Docker build, npm has access to GITHUB_TOKEN and can authenticate. During test execution (`test_install_command`), the container has the token but the `.npmrc` file was removed after the build, so version ranges that trigger version checks will fail without recreating the authentication.
-
