@@ -43,6 +43,11 @@ This workflow is designed for **pure Terraform infrastructure deployments** (no 
 ### 4. Static Site Deploy Workflow
 This workflow syncs a directory of static-site content to an S3 bucket and optionally invalidates a CloudFront distribution. It's meant to run **after** `terraform-infrastructure.yml` has provisioned the bucket (and, in prod, the CloudFront distribution). Typical pattern in a static-site repo: one caller workflow that calls `terraform-infrastructure.yml` for the infra, then calls `static-site-deploy.yml` for the content. Pushes to `develop` deploy to the dev bucket; pushes to `main` deploy to the prod bucket and invalidate CloudFront.
 
+Optional `github_actions_artifact_name` and `s3_upload_rules` inputs support prepared
+build outputs and ordered S3 uploads with per-rule headers and deletion controls.
+Omit both to retain existing behavior. See [static-site artifacts and S3 upload rules](docs/static-site-s3-uploads.md)
+for the interface, a caller example, and maintainer tests.
+
 ## Example Usage
 
 These examples show how to call these reusable workflows from your own repos. You'll still need to create a GitHub Actions workflow in your repo, and that will call this reusable workflow.

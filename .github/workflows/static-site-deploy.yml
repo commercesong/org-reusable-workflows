@@ -23,6 +23,16 @@ on:
         description: 'Path within the repo containing the static site to sync (e.g. "site")'
         required: true
         type: string
+      github_actions_artifact_name:
+        description: 'Optional named GitHub Actions artifact from this run; downloaded into source_path instead of checking out site files.'
+        required: false
+        type: string
+        default: ''
+      s3_upload_rules:
+        description: 'Optional JSON array of ordered s3_copy/s3_sync rules. See docs/static-site-s3-uploads.md for fields and deletion semantics.'
+        required: false
+        type: string
+        default: ''
       bucket_name_dev:
         description: 'S3 bucket name for the dev environment'
         required: true
@@ -81,7 +91,7 @@ jobs:
   deploy-dev:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: inputs.ref == 'refs/heads/develop'
+    if: inputs.ref == 'refs/heads/develop' && inputs.github_actions_artifact_name == '' && inputs.s3_upload_rules == ''
     env:
       AWS_ACCOUNT_ID: ${{ secrets.aws_account_id_dev }}
       AWS_ENV: dev
@@ -110,7 +120,7 @@ jobs:
   deploy-prod:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: inputs.ref == 'refs/heads/main' || inputs.ref == 'refs/heads/master'
+    if: (inputs.ref == 'refs/heads/main' || inputs.ref == 'refs/heads/master') && inputs.github_actions_artifact_name == '' && inputs.s3_upload_rules == ''
     # Auto-deploys to production on main branch merges (following org standard)
     # To add manual approval gates, uncomment: environment: production
     env:
@@ -152,3 +162,198 @@ jobs:
             --distribution-id "${DISTRIBUTION_ID}" \
             --paths ${INVALIDATION_PATHS}
           set +f
+
+  # Opt-in path. The two original jobs above retain their steps and defaults.
+  deploy-configured:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >-
+      (inputs.github_actions_artifact_name != '' || inputs.s3_upload_rules != '') &&
+      (inputs.ref == 'refs/heads/develop' || inputs.ref == 'refs/heads/main' || inputs.ref == 'refs/heads/master')
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets[inputs.ref == 'refs/heads/develop' && 'aws_account_id_dev' || 'aws_account_id_prod'] }}
+      BUCKET_NAME: ${{ inputs[inputs.ref == 'refs/heads/develop' && 'bucket_name_dev' || 'bucket_name_prod'] }}
+      AWS_ENV: ${{ inputs.ref == 'refs/heads/develop' && 'dev' || 'prod' }}
+      S3_UPLOAD_RULES: ${{ inputs.s3_upload_rules }}
+      DELETE_REMOVED: ${{ inputs.delete_removed }}
+      ARTIFACT_NAME: ${{ inputs.github_actions_artifact_name }}
+      DEPLOY_REF: ${{ inputs.ref }}
+      DISTRIBUTION_ID: ${{ inputs.cloudfront_distribution_id_prod }}
+      INVALIDATION_PATHS: ${{ inputs.invalidation_paths }}
+    steps:
+      - name: Check artifact destination
+        if: inputs.github_actions_artifact_name != ''
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          source = Path(os.environ['SOURCE_PATH'])
+          workspace = Path(os.environ['GITHUB_WORKSPACE']).resolve()
+          if not os.environ['SOURCE_PATH'] or source.is_absolute() or '..' in source.parts or str(source).startswith('~'):
+              raise SystemExit('source_path must be a relative directory inside the workspace')
+          if not (workspace / source).resolve().is_relative_to(workspace):
+              raise SystemExit('source_path must stay inside the workspace')
+
+      - name: Checkout site files
+        if: inputs.github_actions_artifact_name == ''
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.COMMIT_HASH }}
+
+      - name: Download prepared site
+        if: inputs.github_actions_artifact_name != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.github_actions_artifact_name }}
+          path: ${{ inputs.source_path }}
+
+      # Inline so callers pinned to a workflow revision also pin the validator.
+      - name: Validate S3 upload plan
+        id: upload-plan
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          def unique_fields(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f's3_upload_rules contains duplicate field {key!r}')
+                  result[key] = value
+              return result
+
+          def text(value, label, allow_empty=False):
+              if not isinstance(value, str) or (not value and not allow_empty):
+                  raise ValueError(f'{label} must be a non-empty string')
+              if any(ord(char) < 32 or ord(char) == 127 for char in value):
+                  raise ValueError(f'{label} must not contain control characters')
+              return value
+
+          def relative(value, label, allow_empty=False):
+              value = text(value, label, allow_empty)
+              if value.startswith('/') or '\\' in value or ':' in value or '..' in value.split('/'):
+                  raise ValueError(f'{label} must be a relative path without .., backslashes, or a URI')
+              return value
+
+          def make_plan(raw, source_path, bucket, delete_removed, workspace):
+              relative(source_path, 'source_path')
+              root = (workspace / source_path).resolve()
+              if not root.is_relative_to(workspace.resolve()) or not root.is_dir():
+                  raise ValueError('source_path must be an existing directory inside the workspace')
+              if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', bucket):
+                  raise ValueError('Selected bucket_name must be an S3 bucket name, not a URI or prefix')
+              if raw == '':
+                  rules = [{'operation': 's3_sync', 'source_directory': '.',
+                            'destination_prefix': '', 'delete_removed': delete_removed}]
+              else:
+                  try:
+                      rules = json.loads(raw, object_pairs_hook=unique_fields)
+                  except json.JSONDecodeError as error:
+                      raise ValueError(f's3_upload_rules must be valid JSON: {error.msg}') from error
+                  if not isinstance(rules, list) or not rules:
+                      raise ValueError('s3_upload_rules must be a non-empty JSON array; omit it for the default sync')
+              commands = []
+              headers = {'cache_control': '--cache-control', 'content_type': '--content-type',
+                         'content_disposition': '--content-disposition'}
+              for number, rule in enumerate(rules, 1):
+                  label = f'Rule {number}'
+                  if not isinstance(rule, dict):
+                      raise ValueError(f'{label}: expected an object')
+                  operation = rule.get('operation')
+                  if operation not in ('s3_copy', 's3_sync'):
+                      raise ValueError(f'{label}: unsupported operation {operation!r}; expected s3_copy or s3_sync')
+                  is_sync = operation == 's3_sync'
+                  source_field = 'source_directory' if is_sync else 'source_file'
+                  target_field = 'destination_prefix' if is_sync else 'destination_key'
+                  allowed = {'operation', source_field, target_field, *headers}
+                  if is_sync:
+                      allowed.update({'include', 'exclude', 'delete_removed'})
+                  unknown = set(rule) - allowed
+                  if unknown:
+                      raise ValueError(f'{label}: unsupported field(s): {", ".join(sorted(unknown))}')
+                  source = relative(rule.get(source_field), f'{label}.{source_field}')
+                  target = relative(rule.get(target_field), f'{label}.{target_field}', allow_empty=is_sync)
+                  if '.' in target.split('/'):
+                      raise ValueError(f'{label}.{target_field} must not contain dot path segments')
+                  if not is_sync and (target.endswith('/') or target == ''):
+                      raise ValueError(f'{label}.destination_key must name one S3 object, not a prefix')
+                  local = root / source
+                  if not local.resolve().is_relative_to(root):
+                      raise ValueError(f'{label}.{source_field} escapes source_path')
+                  # AWS CLI follows symlinks by default. Reject them in the opt-in path.
+                  ancestors = [local, *local.parents]
+                  if any(path.is_symlink() for path in ancestors):
+                      raise ValueError(f'{label}: symbolic links are not supported')
+                  if not (local.is_dir() if is_sync else local.is_file()):
+                      kind = 'directory' if is_sync else 'file'
+                      raise ValueError(f'{label}.{source_field}: missing {kind}: {source}')
+                  if is_sync and any(path.is_symlink() for path in local.rglob('*')):
+                      raise ValueError(f'{label}: symbolic links are not supported')
+                  destination = f's3://{bucket}/' + target
+                  if is_sync and not destination.endswith('/'):
+                      destination += '/'
+                  command = ['aws', 's3', 'sync' if is_sync else 'cp', str(local), destination, '--no-progress']
+                  if is_sync:
+                      delete = rule.get('delete_removed', False)
+                      if not isinstance(delete, bool):
+                          raise ValueError(f'{label}.delete_removed must be a boolean')
+                      if delete:
+                          command.append('--delete')
+                      # AWS applies filters in order: excludes first, then includes.
+                      for field in ('exclude', 'include'):
+                          patterns = rule.get(field, [])
+                          if not isinstance(patterns, list):
+                              raise ValueError(f'{label}.{field} must be an array of strings')
+                          for pattern in patterns:
+                              command.extend([f'--{field}', text(pattern, f'{label}.{field}')])
+                  for field, flag in headers.items():
+                      if field in rule:
+                          command.extend([flag, text(rule[field], f'{label}.{field}')])
+                  commands.append(command)
+              return commands
+
+          try:
+              plan = make_plan(os.environ['S3_UPLOAD_RULES'], os.environ['SOURCE_PATH'],
+                               os.environ['BUCKET_NAME'], os.environ['DELETE_REMOVED'] == 'true',
+                               Path(os.environ['GITHUB_WORKSPACE']))
+          except ValueError as error:
+              raise SystemExit(f'Invalid S3 upload configuration: {error}')
+          plan_file = Path(os.environ['RUNNER_TEMP']) / 'static-site-s3-plan.json'
+          plan_file.write_text(json.dumps(plan), encoding='utf-8')
+          source = ('GitHub Actions artifact ' + os.environ['ARTIFACT_NAME']
+                    if os.environ['ARTIFACT_NAME'] else 'repository checkout')
+          print(f"Deployment: environment={os.environ['AWS_ENV']}, ref={os.environ['DEPLOY_REF']}, commit={os.environ['COMMIT_HASH']}")
+          print(f"Source: {source!r}; directory={os.environ['SOURCE_PATH']!r}; bucket={os.environ['BUCKET_NAME']}")
+          print(f'Validated {len(plan)} S3 upload operation(s) before uploading')
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Execute S3 upload plan
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          plan = json.loads((Path(os.environ['RUNNER_TEMP']) / 'static-site-s3-plan.json').read_text())
+          for number, command in enumerate(plan, 1):
+              print(f'Rule {number}/{len(plan)}: aws s3 {command[2]} {command[3]!r} -> {command[4]!r}; delete={"--delete" in command}', flush=True)
+              subprocess.run(command, check=True)
+              print(f'Rule {number}/{len(plan)} completed successfully', flush=True)
+          print(f'S3 upload plan completed: {len(plan)}/{len(plan)} rules succeeded', flush=True)
+
+      - name: Invalidate CloudFront
+        if: env.AWS_ENV == 'prod' && env.DISTRIBUTION_ID != ''
+        run: |
+          read -r -a paths <<< "$INVALIDATION_PATHS"
+          aws cloudfront create-invalidation \
+            --distribution-id "${DISTRIBUTION_ID}" \
+            --paths "${paths[@]}"

@@ -1,0 +1,80 @@
+name: Smoke test static-site deployment (dev only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-test.txt
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::478543871670:role/github-actions-deploy-dev
+          aws-region: us-east-1
+      - name: Check private dev fixture and prepare tiny site
+        run: python tests/static_site_smoke_fixture.py prepare
+      - uses: actions/upload-artifact@v7
+        with:
+          name: static-site-smoke
+          path: smoke-site/
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    needs: prepare
+    uses: ./.github/workflows/static-site-deploy.yml
+    permissions:
+      contents: read
+      id-token: write
+    secrets:
+      # Account IDs are identifiers, not credentials. No production role is supplied.
+      aws_account_id_dev: '478543871670'
+      aws_account_id_prod: 'unused-no-production-account'
+    with:
+      ref: refs/heads/develop # Explicitly exercise dev routing, even when dispatched from main.
+      commit_hash: ${{ github.sha }}
+      source_path: smoke-site
+      github_actions_artifact_name: static-site-smoke
+      bucket_name_dev: slopapalooza-com-dev
+      bucket_name_prod: unused-no-production-bucket
+      s3_upload_rules: |
+        [
+          {"operation":"s3_sync","source_directory":".","destination_prefix":"_workflow-tests/static-site/github-${{ github.run_id }}-${{ github.run_attempt }}/","exclude":["*.vcf"],"cache_control":"no-cache"},
+          {"operation":"s3_copy","source_file":"contact.vcf","destination_key":"_workflow-tests/static-site/github-${{ github.run_id }}-${{ github.run_attempt }}/contact.vcf","content_type":"text/vcard","content_disposition":"attachment; filename=\"contact.vcf\""},
+          {"operation":"s3_copy","source_file":"contact.vcf","destination_key":"_workflow-tests/static-site/github-${{ github.run_id }}-${{ github.run_attempt }}/contact.vcf.","content_type":"text/vcard"}
+        ]
+
+  verify-and-cleanup:
+    needs: [prepare, deploy]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-test.txt
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::478543871670:role/github-actions-deploy-dev
+          aws-region: us-east-1
+      - name: Verify uploaded bytes and headers, then clean test prefix
+        env:
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        run: python tests/static_site_smoke_fixture.py verify-and-cleanup

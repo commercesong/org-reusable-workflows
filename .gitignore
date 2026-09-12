@@ -15,3 +15,7 @@
 *.tmp
 *.bak
 
+# Python workflow tests
+.venv/
+__pycache__/
+*.pyc
