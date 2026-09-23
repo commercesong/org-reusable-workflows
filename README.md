@@ -239,6 +239,23 @@ jobs:
 - `terraform_version`: Version of Terraform to use (defaults to "1.8.3")
 - `enable_plan_comment`: Whether to comment Terraform plans on PRs (defaults to true)
 - `auto_apply_dev`: Whether to auto-apply to dev environment (defaults to true)
+- `build_command`: Optional shell command run before Terraform in every plan and apply job (defaults to empty, meaning no build step). Use it when Terraform packages application code — for example an `archive_file` zipping a Lambda whose `node_modules` must exist first: `npm ci --omit=dev`.
+- `build_working_directory`: Directory `build_command` runs in, relative to the repo root (defaults to ".")
+- `build_node_version`: Node.js version to set up before `build_command` (defaults to empty, meaning no Node.js setup)
+
+**Build step example** — a Lambda zipped by Terraform:
+
+```yaml
+    with:
+      tf_backend_config_key: "my-service"
+      aws_region: "us-east-1"
+      commit_hash: ${{ github.sha }}
+      ref: ${{ github.ref }}
+      terraform_path: "terraform"
+      build_command: "npm ci --omit=dev"
+      build_working_directory: "src"
+      build_node_version: "24"
+```
 
 **Tfvars Configuration:**
 

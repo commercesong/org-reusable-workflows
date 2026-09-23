@@ -50,6 +50,21 @@ on:
         required: false
         type: boolean
         default: true
+      build_command:
+        description: 'Optional shell command run before Terraform, e.g. "npm ci --omit=dev". Use it when Terraform zips application code (archive_file) that needs dependencies installed first. Empty means no build step.'
+        required: false
+        type: string
+        default: ''
+      build_working_directory:
+        description: 'Directory the build_command runs in, relative to the repo root'
+        required: false
+        type: string
+        default: '.'
+      build_node_version:
+        description: 'Node.js version to set up before running build_command. Empty means no Node.js setup.'
+        required: false
+        type: string
+        default: ''
     secrets:
       aws_account_id_dev:
         description: 'AWS Account ID for Dev'
@@ -101,6 +116,17 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Node.js for build command
+        if: inputs.build_command != '' && inputs.build_node_version != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.build_node_version }}
+
+      - name: Run build command
+        if: inputs.build_command != ''
+        working-directory: ${{ inputs.build_working_directory }}
+        run: ${{ inputs.build_command }}
 
       - name: Terraform Init
         working-directory: ${{ env.TERRAFORM_PATH }}
@@ -179,6 +205,17 @@ jobs:
           role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Set up Node.js for build command
+        if: inputs.build_command != '' && inputs.build_node_version != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.build_node_version }}
+
+      - name: Run build command
+        if: inputs.build_command != ''
+        working-directory: ${{ inputs.build_working_directory }}
+        run: ${{ inputs.build_command }}
+
       - name: Terraform Init
         working-directory: ${{ env.TERRAFORM_PATH }}
         run: |
@@ -221,6 +258,17 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Node.js for build command
+        if: inputs.build_command != '' && inputs.build_node_version != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.build_node_version }}
+
+      - name: Run build command
+        if: inputs.build_command != ''
+        working-directory: ${{ inputs.build_working_directory }}
+        run: ${{ inputs.build_command }}
 
       - name: Terraform Init
         working-directory: ${{ env.TERRAFORM_PATH }}
@@ -272,6 +320,17 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-deploy-${{ env.AWS_ENV }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Node.js for build command
+        if: inputs.build_command != '' && inputs.build_node_version != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.build_node_version }}
+
+      - name: Run build command
+        if: inputs.build_command != ''
+        working-directory: ${{ inputs.build_working_directory }}
+        run: ${{ inputs.build_command }}
 
       - name: Terraform Init
         working-directory: ${{ env.TERRAFORM_PATH }}
