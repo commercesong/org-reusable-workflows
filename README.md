@@ -768,3 +768,13 @@ test_command: "npm test"
 
 **Why exact versions for private packages?**
 During Docker build, npm has access to GITHUB_TOKEN and can authenticate. During test execution (`test_install_command`), the container has the token but the `.npmrc` file was removed after the build, so version ranges that trigger version checks will fail without recreating the authentication.
+
+## Container deployment concurrency
+
+The container workflow queues the entire build/test/deploy sequence by Terraform state key within the calling repository. Its state bucket is derived from an account-ID secret, which GitHub does not allow in concurrency expressions, so dev and prod with the same state key deliberately share one queue. This also protects callers that use the same AWS account for both lanes. No input, secret, default, account selection, or deployment destination changes are required.
+
+For example, two merges to the same service's develop branch start deployments A and B close together. A holds its place in the queue through the initial infrastructure apply, image build, tests where enabled, and remaining deployment jobs. B waits before starting its container-workflow jobs until A has finished the whole sequence. A deployment for another state key does not wait behind them. This is separate from the Terraform lock: the GitHub queue protects the whole sequence, while the lock timeout lets an individual apply wait for a competing state writer outside the queue.
+
+`cancel-in-progress: false` protects the running run from this concurrency group. `queue: max` retains up to 100 waiting runs instead of replacing a waiting deployment. Existing caller concurrency settings still apply and can separately cancel runs. Runs are ordered by when they reach the group, which can differ from commit order; this does not guarantee the newest commit deploys last.
+
+Every container-workflow `terraform apply` waits up to ten minutes for a state lock. That also covers competing applies outside this queue, such as manual deployments. Concurrency groups are scoped to the calling repository; they do not coordinate separate repositories that happen to target the same state. Callers pinned to a commit or tag only receive this change when their reference is updated.

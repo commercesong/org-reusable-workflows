@@ -103,6 +103,19 @@ permissions:
   packages: read
   id-token: write  # Required for OIDC authentication
 
+# Queue the whole build/test/deploy sequence so applies cannot interleave.
+# The bucket is derived from an account-ID secret, which is unavailable in
+# concurrency expressions. Conservatively serialize both lanes for the same
+# state key, including callers that give dev and prod the same AWS account.
+# This needs no new inputs and leaves account/bucket selection unchanged.
+# Keep up to 100 waiting runs; do not cancel the running run from this group.
+# Arrival order can differ from commit order, especially after caller tests.
+# The prefix keeps this group distinct from caller workflow concurrency.
+concurrency:
+  group: cicd-terraform-container-${{ inputs.tf_backend_config_key }}
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   build-and-push-dev:
     runs-on: ubuntu-latest
@@ -146,7 +159,7 @@ jobs:
           echo "$targets"
           
           # Apply ECR resources
-          terraform apply -auto-approve $targets -var-file="env-${{ env.AWS_ENV }}.tfvars"
+          terraform apply -auto-approve -lock-timeout=10m $targets -var-file="env-${{ env.AWS_ENV }}.tfvars"
 
       - name: Ensure IAM resources exist if using test execution role
         if: inputs.test_execution_role_name != ''
@@ -160,7 +173,7 @@ jobs:
           echo "$targets"
           
           # Apply IAM resources
-          terraform apply -auto-approve $targets -var-file="env-${{ env.AWS_ENV }}.tfvars"
+          terraform apply -auto-approve -lock-timeout=10m $targets -var-file="env-${{ env.AWS_ENV }}.tfvars"
 
       - name: Login to Amazon ECR
         run: |
@@ -452,7 +465,7 @@ jobs:
               -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
               -backend-config="region=${{ env.AWS_REGION }}" \
               -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
-          terraform apply -auto-approve -var="image_tag=${{ env.COMMIT_HASH }}" -var-file="env-${{ env.AWS_ENV }}.tfvars"
+          terraform apply -auto-approve -lock-timeout=10m -var="image_tag=${{ env.COMMIT_HASH }}" -var-file="env-${{ env.AWS_ENV }}.tfvars"
   
       - name: Tag image as active after successful deployment
         if: ${{ success() }}
@@ -510,7 +523,7 @@ jobs:
           echo "$targets"
           
           # Apply ECR and IAM resources
-          terraform apply -auto-approve $targets -var-file="env-${{ env.AWS_ENV }}.tfvars"
+          terraform apply -auto-approve -lock-timeout=10m $targets -var-file="env-${{ env.AWS_ENV }}.tfvars"
 
       - name: Login to Amazon ECR
         run: |
@@ -623,7 +636,7 @@ jobs:
               -backend-config="key=${{ env.TF_BACKEND_CONFIG_KEY }}/terraform.tfstate" \
               -backend-config="region=${{ env.AWS_REGION }}" \
               -backend-config="dynamodb_table=terraform-state-locks-${{ env.AWS_ACCOUNT_ID }}"
-          terraform apply -auto-approve -var="image_tag=${{ env.COMMIT_HASH }}" -var-file="env-${{ env.AWS_ENV }}.tfvars"
+          terraform apply -auto-approve -lock-timeout=10m -var="image_tag=${{ env.COMMIT_HASH }}" -var-file="env-${{ env.AWS_ENV }}.tfvars"
   
       - name: Tag image as active after successful deployment
         if: ${{ success() }}
