@@ -34,6 +34,12 @@ Two non-obvious things that will silently break a fresh repo unless handled:
 ### 1. CICD Terraform Container Workflow
 This workflow automates the continuous integration and continuous deployment (CICD) process using Terraform within a containerized environment. It ensures consistent and efficient infrastructure provisioning across multiple environments.
 
+Container callers can set optional `terraform_version` for all build/pre-apply and
+apply jobs when their configuration needs newer Terraform syntax. Omission retains each
+job's legacy version (dev build `1.8.3`; production build and both apply jobs `1.0.0`).
+For example, `terraform_version: "1.8.3"` supports lifecycle preconditions throughout the
+workflow. This input does not change the separate manual deployment workflow.
+
 ### 2. Manual Terraform Deployment Workflow
 This workflow facilitates manual Terraform deployments with added checks and balances. It allows for environment-specific deployments with controlled, manual intervention, ensuring that deployments are carried out safely and intentionally.
 
@@ -86,6 +92,8 @@ jobs:
       test_execution_role_name: "api-test-role"
       disable_docker_cache: false
       job_timeout_minutes: 60
+      # Optional: select the version required by your Terraform configuration.
+      # terraform_version: "1.8.3"
     secrets:
       aws_account_id_dev: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
       aws_account_id_prod: ${{ secrets.AWS_ACCOUNT_ID_PROD }}

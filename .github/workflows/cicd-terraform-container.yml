@@ -78,6 +78,11 @@ on:
         required: false
         type: boolean
         default: false
+      terraform_version:
+        description: 'Terraform version for all build/apply jobs; omit to preserve each job''s legacy version'
+        required: false
+        type: string
+        default: ""
       job_timeout_minutes:
         description: 'Timeout for each job in minutes (default: 60)'
         required: false
@@ -135,7 +140,7 @@ jobs:
         uses: hashicorp/setup-terraform@v1
         with:
           # known issue with 1.9.7 not loading plugins when i use locally
-          terraform_version: 1.8.3
+          terraform_version: ${{ inputs.terraform_version || '1.8.3' }}
 
       - name: Set up AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -445,7 +450,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v1
         with:
-          terraform_version: 1.0.0  # Specify your desired Terraform version here
+          terraform_version: ${{ inputs.terraform_version || '1.0.0' }}
 
       - name: Set up AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -499,7 +504,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v1
         with:
-          terraform_version: 1.0.0  # Specify your desired Terraform version here
+          terraform_version: ${{ inputs.terraform_version || '1.0.0' }}
 
       - name: Set up AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -616,7 +621,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v1
         with:
-          terraform_version: 1.0.0  # Specify your desired Terraform version here
+          terraform_version: ${{ inputs.terraform_version || '1.0.0' }}
 
       - name: Set up AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
