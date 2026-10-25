@@ -73,6 +73,11 @@ on:
         description: 'Role name (not ARN) to assume for running tests'
         required: false
         type: string
+      public_ecr_login:
+        description: 'Authenticate public ECR base-image pulls with the existing AWS role'
+        required: false
+        type: boolean
+        default: false
       disable_docker_cache:
         description: 'Force Docker to build without using cache'
         required: false
@@ -183,6 +188,12 @@ jobs:
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Login to public Amazon ECR
+        if: inputs.public_ecr_login
+        run: |
+          set -euo pipefail
+          aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
 
       # The setup-qemu-action is used to enable multi-architecture builds.
       # When building ARM64 images on AMD64 GitHub runners, we need QEMU for architecture emulation.
@@ -533,6 +544,12 @@ jobs:
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Login to public Amazon ECR
+        if: inputs.public_ecr_login
+        run: |
+          set -euo pipefail
+          aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
 
       # The setup-qemu-action is used to enable multi-architecture builds.
       # When building ARM64 images on AMD64 GitHub runners, we need QEMU for architecture emulation.

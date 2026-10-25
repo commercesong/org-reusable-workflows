@@ -40,6 +40,15 @@ job's legacy version (dev build `1.8.3`; production build and both apply jobs `1
 For example, `terraform_version: "1.8.3"` supports lifecycle preconditions throughout the
 workflow. This input does not change the separate manual deployment workflow.
 
+Container callers pulling base images from `public.ecr.aws` can set
+`public_ecr_login: true` to authenticate those pulls with the job's existing AWS role
+before either development or production Docker build. The default is `false`; omitted
+inputs leave existing callers unchanged. Private ECR login for image publication stays
+separate. The role needs `ecr-public:GetAuthorizationToken` and
+`sts:GetServiceBearerToken`; authentication failures stop the build rather than falling
+back to anonymous pulls. The temporary password is piped to Docker's stdin and never
+passed as a build argument. See [AWS public registry authentication](https://docs.aws.amazon.com/AmazonECR/latest/public/public-registry-auth.html).
+
 ### 2. Manual Terraform Deployment Workflow
 This workflow facilitates manual Terraform deployments with added checks and balances. It allows for environment-specific deployments with controlled, manual intervention, ensuring that deployments are carried out safely and intentionally.
 
